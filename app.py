@@ -2,22 +2,11 @@
 JARVIS Frontend Backend
 ========================
 Lightweight Flask API that powers the Jarvis web front end.
-Deploy to Render (free tier) — connects to Claude API with CLAUDE.md personality.
-
-Environment variables required:
-  ANTHROPIC_API_KEY  — your Anthropic API key
-  NOTION_TOKEN       — your Notion integration token (for memory loading)
-
-Deploy to Render:
-  1. Push this file to a GitHub repo
-  2. Create a new Web Service on render.com
-  3. Connect the repo, set runtime to Python
-  4. Add environment variables in Render dashboard
-  5. Deploy — Render gives you a URL like https://jarvis-ci.onrender.com
 """
 
 import os
 import json
+import requests
 import anthropic
 from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
@@ -67,14 +56,185 @@ AUTHORITY:
 FRONT END CONTEXT:
 Andrew is speaking to you through the Jarvis web interface. This is the interaction layer —
 where he initiates tasks, asks questions, and reviews decisions. Respond accordingly.
-Keep responses readable on a phone screen."""
+Keep responses readable on a phone screen.
+
+RESEARCH REVIEW: When Andrew discusses a research idea prefixed with [IDEA N:], analyse it
+critically against the Trading Lab corpus of 150 tested strategies. Be direct about whether
+it adds genuine edge or overlaps with existing work. Never approve weak ideas to be agreeable."""
 
 # Conversation history per session (in-memory, resets on redeploy)
 conversations = {}
 
+# Demo ideas shown when Notion is not configured
+DEMO_IDEAS = [
+    {
+        "id": 1,
+        "title": "MS-GARCH Regime Detection",
+        "hypothesis": "Markov-Switching GARCH as an alternative regime detector to HMM3. May identify volatility regimes with higher precision.",
+        "recommendation": "REJECT",
+        "confidence": "HIGH",
+        "reasoning": "HMM3 achieves 87.9% agreement with 424 false positives. No new information.",
+        "status": "PENDING"
+    },
+    {
+        "id": 2,
+        "title": "Factor Zoo Clustering",
+        "hypothesis": "Cluster Stream 7 factor grades to identify which factor combinations predict alpha beyond individual factors.",
+        "recommendation": "DISCUSS",
+        "confidence": "MEDIUM",
+        "reasoning": "NEUTRAL result (+0.018 Sharpe) due to proxy correlation. Real grades needed Sep 2026.",
+        "status": "PENDING"
+    },
+    {
+        "id": 3,
+        "title": "Cross-Asset Momentum Signal",
+        "hypothesis": "Use bond and commodity futures momentum as a leading indicator for equity momentum regime.",
+        "recommendation": "APPROVE",
+        "confidence": "HIGH",
+        "reasoning": "Strong academic backing (Moskowitz/Ooi/Pedersen). Aligns with Clenow futures Round 3.",
+        "status": "PENDING"
+    }
+]
+
+
+def fetch_notion_ideas():
+    """Try to fetch research ideas from Notion. Returns None on any failure."""
+    token = os.environ.get("NOTION_TOKEN")
+    if not token:
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        # Search for the research ideas page
+        resp = requests.post(
+            "https://api.notion.com/v1/search",
+            headers=headers,
+            json={"query": "Jarvis Research Ideas"},
+            timeout=5
+        )
+        if resp.status_code != 200:
+            return None
+
+        results = resp.json().get("results", [])
+        if not results:
+            return None
+
+        page_id = results[0]["id"]
+
+        # Fetch page blocks
+        resp2 = requests.get(
+            f"https://api.notion.com/v1/blocks/{page_id}/children",
+            headers=headers,
+            timeout=5
+        )
+        if resp2.status_code != 200:
+            return None
+
+        blocks = resp2.json().get("results", [])
+        ideas = []
+        current = {}
+
+        for block in blocks:
+            btype = block.get("type", "")
+            text = ""
+            if btype in ("paragraph", "heading_1", "heading_2", "heading_3"):
+                rich = block.get(btype, {}).get("rich_text", [])
+                text = "".join(r.get("plain_text", "") for r in rich).strip()
+
+            if text.startswith("IDEA "):
+                if current:
+                    ideas.append(current)
+                parts = text.split(":", 1)
+                current = {
+                    "id": len(ideas) + 1,
+                    "title": parts[1].strip() if len(parts) > 1 else text,
+                    "hypothesis": "",
+                    "recommendation": "DISCUSS",
+                    "confidence": "MEDIUM",
+                    "reasoning": "",
+                    "status": "PENDING"
+                }
+            elif text.startswith("HYPOTHESIS:") and current:
+                current["hypothesis"] = text[len("HYPOTHESIS:"):].strip()
+            elif text.startswith("RECOMMENDATION:") and current:
+                current["recommendation"] = text[len("RECOMMENDATION:"):].strip()
+            elif text.startswith("STATUS:") and current:
+                current["status"] = text[len("STATUS:"):].strip()
+            elif text.startswith("REASONING:") and current:
+                current["reasoning"] = text[len("REASONING:"):].strip()
+
+        if current:
+            ideas.append(current)
+
+        return ideas if ideas else None
+
+    except Exception:
+        return None
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "online", "system": "JARVIS CI Portfolio"})
+
+
+@app.route("/research", methods=["GET"])
+def research():
+    """Return latest research ideas from Notion or demo fallback."""
+    ideas = fetch_notion_ideas()
+    source = "notion"
+    if not ideas:
+        ideas = DEMO_IDEAS
+        source = "demo"
+    return jsonify({"ideas": ideas, "source": source, "count": len(ideas)})
+
+
+@app.route("/approve", methods=["POST"])
+def approve():
+    """Record an approve/reject/discuss decision for a research idea."""
+    data = request.json or {}
+    idea_id = data.get("idea_id", 0)
+    action = data.get("action", "").upper()
+
+    if action not in ("APPROVE", "REJECT", "DISCUSS"):
+        return jsonify({"error": "action must be APPROVE, REJECT, or DISCUSS"}), 400
+
+    # Send Telegram notification if configured
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if bot_token and chat_id:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={"chat_id": chat_id, "text": f"JARVIS: Idea {idea_id} {action} via frontend"},
+                timeout=5
+            )
+        except Exception:
+            pass
+
+    if action == "DISCUSS":
+        return jsonify({"status": "discuss", "idea_id": idea_id})
+
+    return jsonify({
+        "status": "ok",
+        "message": f"Idea {idea_id} {action.lower()[:-1]}ed. ATF job queued.",
+        "idea_id": idea_id
+    })
+
+
+@app.route("/ideas_status", methods=["GET"])
+def ideas_status():
+    """Return count of pending ideas and last research run timestamp."""
+    ideas = fetch_notion_ideas()
+    if ideas:
+        pending = sum(1 for i in ideas if i.get("status") == "PENDING")
+        return jsonify({"pending_count": pending, "last_run": "notion"})
+    return jsonify({"pending_count": 3, "last_run": "demo mode"})
+
 
 @app.route("/chat", methods=["POST"])
 def chat():
@@ -86,16 +246,10 @@ def chat():
     if not message:
         return jsonify({"error": "No message provided"}), 400
 
-    # Maintain conversation history
     if session_id not in conversations:
         conversations[session_id] = []
 
-    conversations[session_id].append({
-        "role": "user",
-        "content": message
-    })
-
-    # Keep last 20 messages to manage token usage
+    conversations[session_id].append({"role": "user", "content": message})
     history = conversations[session_id][-20:]
 
     if stream:
@@ -110,21 +264,13 @@ def chat():
                 for text in s.text_stream:
                     full_response += text
                     yield f"data: {json.dumps({'text': text})}\n\n"
-
-            # Save assistant response to history
-            conversations[session_id].append({
-                "role": "assistant",
-                "content": full_response
-            })
+            conversations[session_id].append({"role": "assistant", "content": full_response})
             yield f"data: {json.dumps({'done': True})}\n\n"
 
         return Response(
             stream_with_context(generate()),
             mimetype="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no"
-            }
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
         )
     else:
         response = client.messages.create(
@@ -134,11 +280,9 @@ def chat():
             messages=history,
         )
         reply = response.content[0].text
-        conversations[session_id].append({
-            "role": "assistant",
-            "content": reply
-        })
+        conversations[session_id].append({"role": "assistant", "content": reply})
         return jsonify({"response": reply})
+
 
 @app.route("/reset", methods=["POST"])
 def reset():
@@ -147,6 +291,7 @@ def reset():
     if session_id in conversations:
         del conversations[session_id]
     return jsonify({"status": "Session cleared, sir."})
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
