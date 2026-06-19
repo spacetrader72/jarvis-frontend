@@ -8,7 +8,7 @@ import os
 import json
 import requests
 import anthropic
-from flask import Flask, request, jsonify, Response, stream_with_context
+from flask import Flask, request, jsonify, Response, stream_with_context, send_from_directory
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -176,7 +176,11 @@ def fetch_notion_ideas():
     except Exception:
         return None
 
+from flask import send_from_directory
 
+@app.route("/")
+def index():
+    return send_from_directory(".", "index.html")
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "online", "system": "JARVIS CI Portfolio"})
