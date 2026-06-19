@@ -511,13 +511,48 @@ async function handleIdea(id, action, idea) {
 }
 
 // ── MESSAGING ─────────────────────────────────────────────────────────────
+// ── Voice output ──────────────────────────────────────────────────────────
+
+let preferredVoice = null;
+
+function loadPreferredVoice() {
+  const voices = window.speechSynthesis.getVoices();
+  // Try Daniel first, then any British male, then any British
+  preferredVoice = voices.find(v => v.name === 'Daniel') ||
+    voices.find(v => v.lang.includes('en-GB') && v.name.toLowerCase().includes('male')) ||
+    voices.find(v => v.lang.includes('en-GB')) ||
+    null;
+}
+
+if (window.speechSynthesis.getVoices().length > 0) {
+  loadPreferredVoice();
+} else {
+  window.speechSynthesis.onvoiceschanged = loadPreferredVoice;
+}
+
+function speakText(text) {
+  if (!window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  // Strip markdown and excess whitespace for cleaner speech
+  const clean = text.replace(/[*_`#]/g, '').replace(/\n+/g, ' ').trim();
+  const u = new SpeechSynthesisUtterance(clean);
+  if (preferredVoice) u.voice = preferredVoice;
+  u.rate = 0.92;
+  u.pitch = 0.95;
+  u.volume = 1.0;
+  window.speechSynthesis.speak(u);
+}
+
 function addMessage(role, content) {
   const msgs = document.getElementById('messages');
   const div = document.createElement('div');
   div.className = `msg ${role}`;
+  const speakBtn = role === 'jarvis'
+    ? `<button onclick="speakText(${JSON.stringify(content)})" title="Speak" style="background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:11px;padding:2px 4px;margin-left:4px;opacity:0.5;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.5">🔊</button>`
+    : '';
   div.innerHTML = `
     <div class="avatar ${role}">${role === 'jarvis' ? 'J' : 'A'}</div>
-    <div class="bubble">${escapeHtml(content)}</div>
+    <div class="bubble">${escapeHtml(content)}${speakBtn}</div>
   `;
   msgs.appendChild(div);
   msgs.scrollTop = msgs.scrollHeight;
