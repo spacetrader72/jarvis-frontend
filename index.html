@@ -448,21 +448,30 @@ function buildIdeaCard(idea) {
     <div class="idea-reasoning">${escapeHtml(idea.reasoning)}</div>
     <div class="idea-divider"></div>
     <div class="idea-actions">
-      <button class="idea-btn approve-btn" onclick="handleIdea(${idea.id}, 'APPROVE', '${escapeHtml(idea.title)}')">APPROVE</button>
-      <button class="idea-btn reject-btn" onclick="handleIdea(${idea.id}, 'REJECT', '${escapeHtml(idea.title)}')">REJECT</button>
-      <button class="idea-btn discuss-btn" onclick="handleIdea(${idea.id}, 'DISCUSS', '${escapeHtml(idea.title)}')">DISCUSS</button>
+      <button class="idea-btn approve-btn" onclick="handleIdea(${idea.id}, 'APPROVE', ${JSON.stringify(idea)})">APPROVE</button>
+      <button class="idea-btn reject-btn" onclick="handleIdea(${idea.id}, 'REJECT', ${JSON.stringify(idea)})">REJECT</button>
+      <button class="idea-btn discuss-btn" onclick="handleIdea(${idea.id}, 'DISCUSS', ${JSON.stringify(idea)})">DISCUSS</button>
     </div>
     <div class="idea-confirm" id="confirm-${idea.id}"></div>
   `;
   return card;
 }
 
-async function handleIdea(id, action, title) {
+async function handleIdea(id, action, idea) {
+  const title = typeof idea === 'object' ? idea.title : idea;
   try {
     const res = await fetch(`${API_BASE}/approve`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ idea_id: id, action: action, session_id: SESSION_ID })
+      body: JSON.stringify({
+        idea_id: id,
+        action: action,
+        session_id: SESSION_ID,
+        title: typeof idea === 'object' ? idea.title : idea,
+        hypothesis: typeof idea === 'object' ? idea.hypothesis : '',
+        recommendation: typeof idea === 'object' ? idea.recommendation : '',
+        reasoning: typeof idea === 'object' ? idea.reasoning : ''
+      })
     });
     const data = await res.json();
 
