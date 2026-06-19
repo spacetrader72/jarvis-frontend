@@ -8,6 +8,7 @@ import os
 import json
 import requests
 import anthropic
+from datetime import date
 from flask import Flask, request, jsonify, Response, stream_with_context, send_from_directory
 from flask_cors import CORS
 
@@ -96,6 +97,8 @@ DEMO_IDEAS = [
     }
 ]
 
+LIVE_POSITIONS_DB_ID = "367834c4-066c-8103-a01e-000b09eadd99"
+
 
 def fetch_notion_ideas():
     """Try to fetch research ideas from Notion. Returns None on any failure."""
@@ -176,11 +179,73 @@ def fetch_notion_ideas():
     except Exception:
         return None
 
+
+def queue_idea_to_notion(idea_id, idea_data):
+    """Write an approved idea to the Live_Positions Notion DB as a research queue entry.
+    Returns (success: bool, error_msg: str|None).
+    """
+    token = os.environ.get("NOTION_TOKEN")
+    if not token:
+        return False, "NOTION_TOKEN not set"
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json"
+    }
+
+    idea_json = json.dumps({
+        "title": idea_data.get("title", ""),
+        "hypothesis": idea_data.get("hypothesis", ""),
+        "recommendation": idea_data.get("recommendation", ""),
+        "reasoning": idea_data.get("reasoning", ""),
+    })
+
+    # Notion rich_text max 2000 chars
+    if len(idea_json) > 2000:
+        idea_json = idea_json[:1997] + "..."
+
+    payload = {
+        "parent": {"database_id": LIVE_POSITIONS_DB_ID},
+        "properties": {
+            "Ticker": {
+                "title": [{"text": {"content": f"JARVIS-QUEUE-{idea_id}"}}]
+            },
+            "Mode": {
+                "select": {"name": "RESEARCH_QUEUE"}
+            },
+            "Status": {
+                "select": {"name": "Pending"}
+            },
+            "Regime_At_Entry": {
+                "rich_text": [{"text": {"content": idea_json}}]
+            },
+            "Entry_Date": {
+                "date": {"start": date.today().isoformat()}
+            }
+        }
+    }
+
+    try:
+        resp = requests.post(
+            "https://api.notion.com/v1/pages",
+            headers=headers,
+            json=payload,
+            timeout=10
+        )
+        if resp.status_code in (200, 201):
+            return True, None
+        return False, f"Notion API {resp.status_code}: {resp.text[:200]}"
+    except Exception as e:
+        return False, str(e)
+
+
 from flask import send_from_directory
 
 @app.route("/")
 def index():
     return send_from_directory(".", "index.html")
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "online", "system": "JARVIS CI Portfolio"})
@@ -223,11 +288,29 @@ def approve():
     if action == "DISCUSS":
         return jsonify({"status": "discuss", "idea_id": idea_id})
 
-    return jsonify({
+    # On APPROVE: write to Notion Live_Positions DB as a research queue entry
+    notion_queued = False
+    notion_error = None
+    if action == "APPROVE":
+        idea_data = {
+            "title": data.get("title", ""),
+            "hypothesis": data.get("hypothesis", ""),
+            "recommendation": data.get("recommendation", "APPROVE"),
+            "reasoning": data.get("reasoning", ""),
+        }
+        notion_queued, notion_error = queue_idea_to_notion(idea_id, idea_data)
+
+    response_payload = {
         "status": "ok",
         "message": f"Idea {idea_id} {action.lower()[:-1]}ed. ATF job queued.",
-        "idea_id": idea_id
-    })
+        "idea_id": idea_id,
+    }
+    if action == "APPROVE":
+        response_payload["notion_queued"] = notion_queued
+        if notion_error:
+            response_payload["notion_error"] = notion_error
+
+    return jsonify(response_payload)
 
 
 @app.route("/ideas_status", methods=["GET"])
