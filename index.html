@@ -577,6 +577,37 @@ function setStatus(state) {
   text.textContent = { '': 'ONLINE', 'thinking': 'PROCESSING', 'listening': 'LISTENING', 'offline': 'OFFLINE' }[state] || 'ONLINE';
 }
 
+// ── Progressive acknowledgement ───────────────────────────────────────────
+
+const ACKNOWLEDGEMENTS = [
+  "One moment, sir. Running analysis.",
+  "On it. Cross-referencing now.",
+  "Understood. Give me a moment.",
+  "Accessing that now, sir.",
+  "Scanning relevant data.",
+  "Processing your request, sir.",
+  "Running the numbers. Stand by.",
+  "Right away, sir.",
+  "Pulling that together now.",
+  "On it."
+];
+
+const LONG_QUERY_SIGNALS = [
+  'research', 'analys', 'compare', 'explain', 'review', 'find', 'look at',
+  'tell me about', 'what does', 'what is', 'how does', 'summarise', 'summarize',
+  'describe', 'evaluate', 'assess', 'investigate', 'search', 'check', 'show me'
+];
+
+function isLongQuery(text) {
+  const lower = text.toLowerCase();
+  if (text.split(' ').length > 12) return true;
+  return LONG_QUERY_SIGNALS.some(signal => lower.includes(signal));
+}
+
+function getAcknowledgement() {
+  return ACKNOWLEDGEMENTS[Math.floor(Math.random() * ACKNOWLEDGEMENTS.length)];
+}
+
 async function sendMessage(overrideText) {
   const input = document.getElementById('input');
   const text = (overrideText || input.value).trim();
@@ -588,6 +619,20 @@ async function sendMessage(overrideText) {
   input.value = '';
   autoResize(input);
   addMessage('user', text);
+
+  // Progressive acknowledgement for longer queries
+  let ackMsg = null;
+  if (isLongQuery(text)) {
+    const ack = getAcknowledgement();
+    ackMsg = addMessage('jarvis', ack);
+    // Style it as a temporary acknowledgement
+    if (ackMsg) {
+      const bubble = ackMsg.querySelector('.bubble');
+      if (bubble) bubble.style.opacity = '0.6';
+    }
+    await sleep(600);
+  }
+
   addThinking();
   isThinking = true;
   setStatus('thinking');
@@ -602,9 +647,12 @@ async function sendMessage(overrideText) {
     removeThinking();
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
+    // Remove acknowledgement message before showing real response
+    if (ackMsg) ackMsg.remove();
     addMessage('jarvis', data.response);
   } catch (err) {
     removeThinking();
+    if (ackMsg) ackMsg.remove();
     addMessage('jarvis', `Apologies, sir — connection issue. ${err.message}\n\nShall we try again?`);
   } finally {
     isThinking = false;
