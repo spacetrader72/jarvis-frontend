@@ -97,7 +97,7 @@ DEMO_IDEAS = [
     }
 ]
 
-LIVE_POSITIONS_DB_ID = "367834c4-066c-8103-a01e-000b09eadd99"
+LIVE_POSITIONS_DB_ID = "367834c4-066c-8107-bbeb-ef5def16b17d"
 
 
 def fetch_notion_ideas():
