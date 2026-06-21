@@ -254,70 +254,50 @@ def load_conversation(session_id):
     return []
 
 def save_conversation(session_id, messages):
-    """Save conversation history to Notion asynchronously (best effort)."""
-    token = os.environ.get("NOTION_TOKEN", "")
-    if not token:
-        return
-    try:
-        title = _notion_session_title(session_id)
-        history_json = json.dumps(messages[-20:], ensure_ascii=False)
-
-        # Check if page exists
-        resp = requests.post(
-            f"{NOTION_API}/search",
-            headers=notion_headers(),
-            json={"query": title, "filter": {"property": "object", "value": "page"}},
-            timeout=5,
-        )
-        existing_id = None
-        if resp.status_code == 200:
-            results = resp.json().get("results", [])
-            if results:
-                existing_id = results[0]["id"]
-
-        code_block = {
-            "object": "block",
-            "type": "code",
-            "code": {
-                "rich_text": [{"type": "text", "text": {"content": history_json[:2000]}}],
-                "language": "json",
-            },
-        }
-
-        if existing_id:
-            # Delete existing blocks and rewrite
-            resp2 = requests.get(
-                f"{NOTION_API}/blocks/{existing_id}/children",
-                headers=notion_headers(),
-                timeout=5,
-            )
-            if resp2.status_code == 200:
-                for block in resp2.json().get("results", []):
-                    requests.delete(
-                        f"{NOTION_API}/blocks/{block['id']}",
-                        headers=notion_headers(),
-                        timeout=3,
-                    )
-            requests.patch(
-                f"{NOTION_API}/blocks/{existing_id}/children",
-                headers=notion_headers(),
-                json={"children": [code_block]},
-                timeout=5,
-            )
-        else:
-            # Create new page
-            requests.post(
-                f"{NOTION_API}/pages",
-                headers=notion_headers(),
-                json={
-                    "parent": {"page_id": NOTION_ROOT_ID},
-                    "properties": {"title": {"title": [{"text": {"content": title}}]}},
-                    "children": [code_block],
+    """Save conversation history to Notion — fire and forget, never blocks chat."""
+    import threading
+    def _save():
+        token = os.environ.get("NOTION_TOKEN", "")
+        if not token:
+            return
+        try:
+            title = _notion_session_title(session_id)
+            history_json = json.dumps(messages[-20:], ensure_ascii=False)
+            code_block = {
+                "object": "block",
+                "type": "code",
+                "code": {
+                    "rich_text": [{"type": "text", "text": {"content": history_json[:2000]}}],
+                    "language": "json",
                 },
-                timeout=5,
+            }
+            # Check if page exists
+            resp = requests.post(
+                f"{NOTION_API}/search",
+                headers=notion_headers(),
+                json={"query": title, "filter": {"property": "object", "value": "page"}},
+                timeout=3,
             )
-    except Exception:
-        pass
+            existing_id = None
+            if resp.status_code == 200:
+                results = resp.json().get("results", [])
+                if results:
+                    existing_id = results[0]["id"]
+
+            if existing_id:
+                resp2 = requests.get(f"{NOTION_API}/blocks/{existing_id}/children", headers=notion_headers(), timeout=3)
+                if resp2.status_code == 200:
+                    for block in resp2.json().get("results", []):
+                        try:
+                            requests.delete(f"{NOTION_API}/blocks/{block['id']}", headers=notion_headers(), timeout=2)
+                        except Exception:
+                            pass
+                requests.patch(f"{NOTION_API}/blocks/{existing_id}/children", headers=notion_headers(), json={"children": [code_block]}, timeout=3)
+            else:
+                requests.post(f"{NOTION_API}/pages", headers=notion_headers(), json={"parent": {"page_id": NOTION_ROOT_ID}, "properties": {"title": {"title": [{"text": {"content": title}}]}}, "children": [code_block]}, timeout=3)
+        except Exception:
+            pass
+    threading.Thread(target=_save, daemon=True).start()
 
 def clear_conversation(session_id):
     """Clear conversation from memory and Notion."""
