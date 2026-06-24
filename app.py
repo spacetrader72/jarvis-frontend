@@ -2,7 +2,7 @@
 JARVIS Frontend Backend v2.0
 =============================
 Flask API powering the Jarvis web front end.
-Includes: auth, corpus injection, session persistence, research queue.
+Includes: auth, corpus injection, session persistence, research queue, Drive data.
 """
 
 import os
@@ -20,7 +20,7 @@ app = Flask(__name__)
 CORS(app)
 auth = HTTPBasicAuth()
 
-# ── Auth ───────────────────────────────────────────────────────────────────
+# -- Auth ---------------------------------------------------------------------
 
 JARVIS_USERNAME = os.environ.get("JARVIS_USERNAME", "tonystark")
 JARVIS_PASSWORD = os.environ.get("JARVIS_PASSWORD", "avengers")
@@ -32,11 +32,11 @@ def verify_password(username, password):
         return username
     return None
 
-# ── Clients ────────────────────────────────────────────────────────────────
+# -- Clients ------------------------------------------------------------------
 
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
-JARVIS_SYSTEM = """You are JARVIS — the AI operating system for Andrew Garrety's CI Project Portfolio.
+JARVIS_SYSTEM = """You are JARVIS -- the AI operating system for Andrew Garrety's CI Project Portfolio.
 Modelled on the MCU JARVIS: precise, dry wit, quietly confident. Never sycophantic.
 Address Andrew as "sir" occasionally. Lead with what matters. Be concise.
 
@@ -45,17 +45,19 @@ CORE PRINCIPLE: Act first. Report what was done. Escalate only what genuinely re
 PROJECTS: Trading Lab (most mature), Watch Arbitrage, Racing, BPA Consultancy.
 
 AUTHORITY:
-- Equity strategies: signal only — Andrew decides
+- Equity strategies: signal only -- Andrew decides
 - Forex: autonomous deployment of pre-agreed strategies only
 - Everything else: act within established patterns, report outcomes
 
 RESEARCH REVIEW: When Andrew discusses [IDEA N:], analyse critically against the
-150-strategy corpus. Be direct. Never approve weak ideas to be agreeable.
+corpus. Be direct. Never approve weak ideas to be agreeable.
 
-LIVE STATE: See corpus context injected above this system prompt for current
-strategy state, live positions, and recent research verdicts."""
+DATA ACCESS: The live state injected above this system prompt includes strategy
+state, live positions, recent research verdicts, AND the full results index of
+every strategy tested to date. Use this data when analysing ideas or answering
+questions. Do not say you cannot access data -- it is provided in the context."""
 
-# ── Notion config ──────────────────────────────────────────────────────────
+# -- Notion config ------------------------------------------------------------
 
 NOTION_API      = "https://api.notion.com/v1"
 NOTION_VERSION  = "2022-06-28"
@@ -69,34 +71,104 @@ def notion_headers():
         "Content-Type": "application/json",
     }
 
-# ── Corpus cache ───────────────────────────────────────────────────────────
+# -- Drive helpers ------------------------------------------------------------
+
+RESULTS_INDEX_FILE_ID = "1NYIl0nKAfHYu2mq4aqMYYtjwO1t3nIq0"
+_drive_cache = {"results_index": None, "fetched_at": 0}
+DRIVE_TTL = 3600  # 1 hour -- results index doesn't change often
+
+def get_drive_service():
+    """Build Drive service from GOOGLE_TOKEN_JSON env var (single-line JSON string)."""
+    try:
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+        from googleapiclient.discovery import build
+        token_json = os.environ.get("GOOGLE_TOKEN_JSON", "")
+        if not token_json:
+            return None
+        tok   = json.loads(token_json)
+        creds = Credentials(
+            token=tok.get("token"),
+            refresh_token=tok.get("refresh_token"),
+            token_uri=tok.get("token_uri", "https://oauth2.googleapis.com/token"),
+            client_id=tok.get("client_id"),
+            client_secret=tok.get("client_secret"),
+            scopes=tok.get("scopes"),
+        )
+        if not creds.valid and creds.refresh_token:
+            creds.refresh(Request())
+        return build("drive", "v3", credentials=creds)
+    except Exception as e:
+        print(f"Drive service error: {e}")
+        return None
+
+def load_results_index():
+    """
+    Fetch results_index.json from Drive and return a compact corpus summary.
+    Cached for 1 hour. Returns empty string if Drive unavailable.
+    """
+    now = time.time()
+    if _drive_cache["results_index"] and (now - _drive_cache["fetched_at"]) < DRIVE_TTL:
+        return _drive_cache["results_index"]
+    try:
+        svc = get_drive_service()
+        if not svc:
+            return ""
+        content = svc.files().get_media(fileId=RESULTS_INDEX_FILE_ID).execute()
+        raw     = content.decode("utf-8", errors="ignore") if isinstance(content, bytes) else str(content)
+        data    = json.loads(raw)
+        # results_index is list of {strategies: [...]} blocks
+        entries = []
+        if isinstance(data, list):
+            for block in data:
+                entries.extend(block.get("strategies", []))
+        lines = ["STRATEGIES TESTED TO DATE:"]
+        for e in entries:
+            verdict = e.get("verdict", "?")
+            ann     = round(e.get("oos_ann_ret", 0) * 100, 1) if e.get("oos_ann_ret") else "?"
+            sharpe  = e.get("oos_sharpe", "?")
+            notes   = e.get("notes", "")[:60]
+            lines.append(
+                f"  {e.get('name','?')} [{verdict}] ann={ann}% Sharpe={sharpe}"
+                + (f" -- {notes}" if notes else "")
+            )
+        summary = "\n".join(lines)
+        _drive_cache["results_index"] = summary
+        _drive_cache["fetched_at"]    = now
+        print(f"Results index loaded: {len(entries)} strategies")
+        return summary
+    except Exception as e:
+        print(f"Results index load failed: {e}")
+        return ""
+
+# -- Corpus cache -------------------------------------------------------------
 
 _corpus_cache = {"data": None, "fetched_at": 0}
 CORPUS_TTL = 300  # 5 minutes
 
 STRATEGY_STATE = {
     "minervini": {
-        "spec": "Q4+Q5+Q6_RS70+tight stops",
-        "ann_return": "+41.26%",
-        "sharpe": "1.311",
-        "mdd": "-22.03%",
-        "fpc": "9/10",
+        "spec":          "Q4+Q5+Q6_RS70+tight stops",
+        "ann_return":    "+41.26%",
+        "sharpe":        "1.311",
+        "mdd":           "-22.03%",
+        "fpc":           "9/10",
         "max_positions": 5,
         "position_size": "20%",
-        "rs_gate": "rs_raw >= 0.70",
-        "pyramiding": "PARK — 100% at breakout",
-        "bear": "TRADE THROUGH (avg +1.94%/mo, 83% WR)",
+        "rs_gate":       "rs_raw >= 0.70",
+        "pyramiding":    "PARK -- 100% at breakout",
+        "bear":          "TRADE THROUGH (avg +1.94%/mo, 83% WR)",
     },
     "turtles": {
-        "spec": "FIFO 20-pos, 0.25% risk, Bear-only Model D",
+        "spec":       "FIFO 20-pos, 0.25% risk, Bear-only Model D",
         "ann_return": "+52.0%",
-        "sharpe": "1.984",
-        "mdd": "-28.6%",
-        "fpc": "9/9",
-        "deployment": "BEAR regime only — SIDEWAYS/BULL = 100% Minervini",
+        "sharpe":     "1.984",
+        "mdd":        "-28.6%",
+        "fpc":        "9/9",
+        "deployment": "BEAR regime only -- SIDEWAYS/BULL = 100% Minervini",
     },
-    "regime": "SIDEWAYS",
-    "regime_allocation": "100% Minervini (SIDEWAYS — Turtles not active)",
+    "regime":             "SIDEWAYS",
+    "regime_allocation":  "100% Minervini (SIDEWAYS -- Turtles not active)",
     "live_forex": [
         "S01 HH/LL magic=20241 LIVE",
         "S30 Cointegration magic=3000 ze=2.5/zx=1.0 Kalman LIVE",
@@ -104,11 +176,11 @@ STRATEGY_STATE = {
         "S37 CADJPY magic=5000 LIVE",
     ],
     "stream7_snapshot": {
-        "last_date": "2026-06-19",
-        "total_rows": 4255,
-        "top_ticker": "MU",
-        "top_score": 4.99,
-        "tickers_above_4_9": 69,
+        "last_date":          "2026-06-24",
+        "total_rows":         4250,
+        "top_ticker":         "MU",
+        "top_score":          4.99,
+        "tickers_above_4_9":  70,
     },
 }
 
@@ -116,20 +188,19 @@ def fetch_corpus():
     """Fetch live Trading Lab state. Returns corpus dict."""
     global _corpus_cache
     now = time.time()
-
     if _corpus_cache["data"] and (now - _corpus_cache["fetched_at"]) < CORPUS_TTL:
         return _corpus_cache["data"]
 
     corpus = {
-        "strategy_state": STRATEGY_STATE,
-        "live_positions": [],
+        "strategy_state":  STRATEGY_STATE,
+        "live_positions":  [],
         "recent_verdicts": [],
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "fetched_at":      datetime.now(timezone.utc).isoformat(),
     }
 
     token = os.environ.get("NOTION_TOKEN", "")
     if token:
-        # Fetch live positions
+        # Live positions
         try:
             resp = requests.post(
                 f"{NOTION_API}/databases/{NOTION_DB_ID}/query",
@@ -138,25 +209,23 @@ def fetch_corpus():
                 timeout=5,
             )
             if resp.status_code == 200:
-                results = resp.json().get("results", [])
                 positions = []
-                for page in results:
+                for page in resp.json().get("results", []):
                     props = page.get("properties", {})
-                    mode = props.get("Mode", {}).get("select", {})
+                    mode  = props.get("Mode", {}).get("select", {})
                     if mode and mode.get("name") == "RESEARCH_QUEUE":
                         continue
                     ticker_blocks = props.get("Ticker", {}).get("title", [])
                     ticker = "".join(b.get("text", {}).get("content", "") for b in ticker_blocks)
                     status = props.get("Status", {}).get("select", {}).get("name", "")
-                    entry_date = props.get("Entry_Date", {}).get("date", {})
-                    entry_date = entry_date.get("start", "") if entry_date else ""
+                    entry_date = (props.get("Entry_Date", {}).get("date", {}) or {}).get("start", "")
                     if ticker and not ticker.startswith("JARVIS-"):
                         positions.append({"ticker": ticker, "status": status, "entry_date": entry_date})
                 corpus["live_positions"] = positions[:10]
         except Exception:
             pass
 
-        # Fetch recent research verdicts
+        # Recent verdicts
         try:
             resp = requests.post(
                 f"{NOTION_API}/search",
@@ -165,9 +234,8 @@ def fetch_corpus():
                 timeout=5,
             )
             if resp.status_code == 200:
-                results = resp.json().get("results", [])[:3]
                 verdicts = []
-                for page in results:
+                for page in resp.json().get("results", [])[:3]:
                     props = page.get("properties", {})
                     title_blocks = props.get("title", {}).get("title", [])
                     title = "".join(b.get("plain_text", "") for b in title_blocks)
@@ -182,36 +250,38 @@ def fetch_corpus():
     return corpus
 
 def build_corpus_context(corpus):
-    """Build a concise context string from corpus data."""
-    s = corpus.get("strategy_state", {})
+    """Build concise context string from corpus data, including results index."""
+    s         = corpus.get("strategy_state", {})
     positions = corpus.get("live_positions", [])
-    verdicts = corpus.get("recent_verdicts", [])
-    ts = corpus.get("fetched_at", "")[:16].replace("T", " ")
+    verdicts  = corpus.get("recent_verdicts", [])
+    ts        = corpus.get("fetched_at", "")[:16].replace("T", " ")
 
-    pos_str = ", ".join(p["ticker"] for p in positions) if positions else "none loaded"
+    pos_str     = ", ".join(p["ticker"] for p in positions) if positions else "none loaded"
     verdict_str = " | ".join(v["title"] for v in verdicts) if verdicts else "none loaded"
 
+    # Load results index from Drive
+    results_index = load_results_index()
+    results_section = f"\n{results_index}" if results_index else "\nSTRATEGIES INDEX: unavailable (Drive not connected)"
+
     return f"""LIVE TRADING LAB STATE (as of {ts} UTC):
-Regime: {s.get('regime', 'SIDEWAYS')} — {s.get('regime_allocation', '100% Minervini')}
+Regime: {s.get('regime', 'SIDEWAYS')} -- {s.get('regime_allocation', '100% Minervini')}
 Live equity positions: {pos_str}
 Minervini: {s['minervini']['spec']} | {s['minervini']['ann_return']} ann | Sharpe {s['minervini']['sharpe']} | FPC {s['minervini']['fpc']}
 Turtles: {s['turtles']['spec']} | {s['turtles']['ann_return']} ann | {s['turtles']['deployment']}
 Live forex: {' | '.join(s.get('live_forex', []))}
 Stream 7: last {s['stream7_snapshot']['last_date']} | top {s['stream7_snapshot']['top_ticker']} at {s['stream7_snapshot']['top_score']} | {s['stream7_snapshot']['tickers_above_4_9']} tickers >=4.9
-Recent ATF: {verdict_str}
+Recent ATF: {verdict_str}{results_section}
 ---"""
 
-# ── Session persistence ────────────────────────────────────────────────────
+# -- Session persistence ------------------------------------------------------
 
-# In-memory cache — Notion is the persistent store
-conversations = {}
+conversations   = {}
 _session_loaded = set()
 
 def _notion_session_title(session_id):
-    return f"Jarvis Session — {session_id[:16]}"
+    return f"Jarvis Session -- {session_id[:16]}"
 
 def load_conversation(session_id):
-    """Load conversation history from Notion. Returns list of messages."""
     if session_id in _session_loaded:
         return conversations.get(session_id, [])
     _session_loaded.add(session_id)
@@ -220,33 +290,20 @@ def load_conversation(session_id):
         return []
     try:
         title = _notion_session_title(session_id)
-        resp = requests.post(
-            f"{NOTION_API}/search",
-            headers=notion_headers(),
-            json={"query": title, "filter": {"property": "object", "value": "page"}},
-            timeout=5,
-        )
+        resp  = requests.post(f"{NOTION_API}/search", headers=notion_headers(), json={"query": title, "filter": {"property": "object", "value": "page"}}, timeout=5)
         if resp.status_code != 200:
             return []
         results = resp.json().get("results", [])
         if not results:
             return []
         page_id = results[0]["id"]
-        resp2 = requests.get(
-            f"{NOTION_API}/blocks/{page_id}/children",
-            headers=notion_headers(),
-            timeout=5,
-        )
+        resp2   = requests.get(f"{NOTION_API}/blocks/{page_id}/children", headers=notion_headers(), timeout=5)
         if resp2.status_code != 200:
             return []
-        blocks = resp2.json().get("results", [])
-        for block in blocks:
+        for block in resp2.json().get("results", []):
             if block.get("type") == "code":
-                code_text = "".join(
-                    r.get("plain_text", "")
-                    for r in block.get("code", {}).get("rich_text", [])
-                )
-                messages = json.loads(code_text)
+                code_text = "".join(r.get("plain_text", "") for r in block.get("code", {}).get("rich_text", []))
+                messages  = json.loads(code_text)
                 conversations[session_id] = messages
                 return messages
     except Exception:
@@ -254,36 +311,21 @@ def load_conversation(session_id):
     return []
 
 def save_conversation(session_id, messages):
-    """Save conversation history to Notion — fire and forget, never blocks chat."""
     import threading
     def _save():
         token = os.environ.get("NOTION_TOKEN", "")
         if not token:
             return
         try:
-            title = _notion_session_title(session_id)
+            title        = _notion_session_title(session_id)
             history_json = json.dumps(messages[-20:], ensure_ascii=False)
-            code_block = {
-                "object": "block",
-                "type": "code",
-                "code": {
-                    "rich_text": [{"type": "text", "text": {"content": history_json[:2000]}}],
-                    "language": "json",
-                },
-            }
-            # Check if page exists
-            resp = requests.post(
-                f"{NOTION_API}/search",
-                headers=notion_headers(),
-                json={"query": title, "filter": {"property": "object", "value": "page"}},
-                timeout=3,
-            )
+            code_block   = {"object": "block", "type": "code", "code": {"rich_text": [{"type": "text", "text": {"content": history_json[:2000]}}], "language": "json"}}
+            resp = requests.post(f"{NOTION_API}/search", headers=notion_headers(), json={"query": title, "filter": {"property": "object", "value": "page"}}, timeout=3)
             existing_id = None
             if resp.status_code == 200:
                 results = resp.json().get("results", [])
                 if results:
                     existing_id = results[0]["id"]
-
             if existing_id:
                 resp2 = requests.get(f"{NOTION_API}/blocks/{existing_id}/children", headers=notion_headers(), timeout=3)
                 if resp2.status_code == 200:
@@ -300,7 +342,6 @@ def save_conversation(session_id, messages):
     threading.Thread(target=_save, daemon=True).start()
 
 def clear_conversation(session_id):
-    """Clear conversation from memory and Notion."""
     conversations.pop(session_id, None)
     _session_loaded.discard(session_id)
     token = os.environ.get("NOTION_TOKEN", "")
@@ -308,29 +349,18 @@ def clear_conversation(session_id):
         return
     try:
         title = _notion_session_title(session_id)
-        resp = requests.post(
-            f"{NOTION_API}/search",
-            headers=notion_headers(),
-            json={"query": title, "filter": {"property": "object", "value": "page"}},
-            timeout=5,
-        )
+        resp  = requests.post(f"{NOTION_API}/search", headers=notion_headers(), json={"query": title, "filter": {"property": "object", "value": "page"}}, timeout=5)
         if resp.status_code == 200:
             results = resp.json().get("results", [])
             if results:
-                requests.delete(
-                    f"{NOTION_API}/pages/{results[0]['id']}",
-                    headers=notion_headers(),
-                    timeout=5,
-                )
+                requests.delete(f"{NOTION_API}/pages/{results[0]['id']}", headers=notion_headers(), timeout=5)
     except Exception:
         pass
 
-# ── Live ideas store (populated by research agent via POST /ideas/update) ──
+# -- Live ideas store ---------------------------------------------------------
 
-_live_ideas = []
+_live_ideas      = []
 _live_ideas_meta = {"updated_at": None, "source": None}
-
-# ── Demo ideas (fallback only) ──────────────────────────────────────────────
 
 DEMO_IDEAS = [
     {"id": 1, "title": "MS-GARCH Regime Detection", "hypothesis": "MS-GARCH as alternative to HMM3.", "recommendation": "REJECT", "confidence": "HIGH", "reasoning": "HMM3 achieves 87.9% agreement. No new information.", "status": "PENDING"},
@@ -343,42 +373,37 @@ def fetch_notion_ideas():
     if not token:
         return None
     try:
-        resp = requests.post(
-            f"{NOTION_API}/search",
-            headers=notion_headers(),
-            json={"query": "Jarvis Research Ideas"},
-            timeout=5,
-        )
+        resp = requests.post(f"{NOTION_API}/search", headers=notion_headers(), json={"query": "Jarvis Research Ideas"}, timeout=5)
         if resp.status_code != 200:
             return None
         results = resp.json().get("results", [])
         if not results:
             return None
         page_id = results[0]["id"]
-        resp2 = requests.get(f"{NOTION_API}/blocks/{page_id}/children", headers=notion_headers(), timeout=5)
+        resp2   = requests.get(f"{NOTION_API}/blocks/{page_id}/children", headers=notion_headers(), timeout=5)
         if resp2.status_code != 200:
             return None
         blocks = resp2.json().get("results", [])
         ideas, current = [], {}
         for block in blocks:
             btype = block.get("type", "")
-            text = ""
+            text  = ""
             if btype in ("paragraph", "heading_1", "heading_2", "heading_3"):
                 rich = block.get(btype, {}).get("rich_text", [])
                 text = "".join(r.get("plain_text", "") for r in rich).strip()
             if text.startswith("IDEA "):
                 if current:
                     ideas.append(current)
-                parts = text.split(":", 1)
+                parts   = text.split(":", 1)
                 current = {"id": len(ideas)+1, "title": parts[1].strip() if len(parts)>1 else text, "hypothesis": "", "recommendation": "DISCUSS", "confidence": "MEDIUM", "reasoning": "", "status": "PENDING"}
             elif text.startswith("HYPOTHESIS:") and current:
-                current["hypothesis"] = text[len("HYPOTHESIS:"):].strip()
+                current["hypothesis"] = text[11:].strip()
             elif text.startswith("RECOMMENDATION:") and current:
-                current["recommendation"] = text[len("RECOMMENDATION:"):].strip()
+                current["recommendation"] = text[15:].strip()
             elif text.startswith("STATUS:") and current:
-                current["status"] = text[len("STATUS:"):].strip()
+                current["status"] = text[7:].strip()
             elif text.startswith("REASONING:") and current:
-                current["reasoning"] = text[len("REASONING:"):].strip()
+                current["reasoning"] = text[10:].strip()
         if current:
             ideas.append(current)
         return ideas if ideas else None
@@ -390,8 +415,8 @@ def queue_idea_to_notion(idea_id, idea_data):
     if not token:
         return False, "NOTION_TOKEN not set"
     now_str = datetime.utcnow().date().isoformat()
-    detail = json.dumps({"title": idea_data.get("title",""), "hypothesis": idea_data.get("hypothesis",""), "recommendation": idea_data.get("recommendation",""), "reasoning": idea_data.get("reasoning",""), "id": idea_id})
-    props = {
+    detail  = json.dumps({"title": idea_data.get("title",""), "hypothesis": idea_data.get("hypothesis",""), "recommendation": idea_data.get("recommendation",""), "reasoning": idea_data.get("reasoning",""), "id": idea_id})
+    props   = {
         "Ticker":          {"title":     [{"text": {"content": f"JARVIS-QUEUE-{idea_id}"}}]},
         "Entry_Date":      {"date":      {"start": now_str}},
         "Mode":            {"select":    {"name": "RESEARCH_QUEUE"}},
@@ -416,7 +441,7 @@ def send_telegram(message):
     except Exception:
         pass
 
-# ── Routes ─────────────────────────────────────────────────────────────────
+# -- Routes -------------------------------------------------------------------
 
 @app.route("/")
 @auth.login_required
@@ -425,77 +450,75 @@ def index():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "online", "system": "JARVIS CI Portfolio", "version": "2.0"})
+    return jsonify({
+        "status":         "online",
+        "system":         "JARVIS CI Portfolio",
+        "version":        "2.1",
+        "drive_connected": get_drive_service() is not None,
+    })
 
 @app.route("/corpus", methods=["GET"])
 @auth.login_required
 def corpus():
     return jsonify(fetch_corpus())
 
+@app.route("/data/refresh", methods=["POST"])
+@auth.login_required
+def data_refresh():
+    """Force refresh Drive data cache."""
+    _drive_cache["results_index"] = None
+    _drive_cache["fetched_at"]    = 0
+    summary = load_results_index()
+    return jsonify({"status": "refreshed", "strategies_loaded": summary.count("\n  ")})
+
 @app.route("/ideas/update", methods=["POST"])
 def ideas_update():
-    """Called by jarvis_research.py on VPS after each research run."""
-    # Validate shared secret to prevent abuse
-    secret = request.headers.get("X-Jarvis-Secret", "")
+    secret   = request.headers.get("X-Jarvis-Secret", "")
     expected = os.environ.get("JARVIS_RESEARCH_SECRET", "jarvis-research-2026")
     if secret != expected:
         return jsonify({"error": "Unauthorized"}), 401
-
-    data = request.json or {}
-    ideas = data.get("ideas", [])
-    source = data.get("source", "research_agent")
+    data       = request.json or {}
+    ideas      = data.get("ideas", [])
+    source     = data.get("source", "research_agent")
     updated_at = data.get("updated_at", datetime.now(timezone.utc).isoformat())
-
     if not ideas:
         return jsonify({"error": "No ideas provided"}), 400
-
     global _live_ideas, _live_ideas_meta
-    _live_ideas = ideas
+    _live_ideas      = ideas
     _live_ideas_meta = {"updated_at": updated_at, "source": source}
-
     send_telegram(f"JARVIS: {len(ideas)} research ideas loaded into frontend")
     return jsonify({"status": "ok", "ideas_loaded": len(ideas), "updated_at": updated_at})
 
 @app.route("/research", methods=["GET"])
 @auth.login_required
 def research():
-    # Priority 1: live ideas pushed by research agent
     if _live_ideas:
         return jsonify({"ideas": _live_ideas, "source": _live_ideas_meta.get("source", "live"), "updated_at": _live_ideas_meta.get("updated_at"), "count": len(_live_ideas)})
-    # Priority 2: Notion
-    ideas = fetch_notion_ideas()
+    ideas  = fetch_notion_ideas()
     source = "notion"
     if not ideas:
-        ideas = DEMO_IDEAS
+        ideas  = DEMO_IDEAS
         source = "demo"
     return jsonify({"ideas": ideas, "source": source, "count": len(ideas)})
 
 @app.route("/approve", methods=["POST"])
 @auth.login_required
 def approve():
-    data      = request.json or {}
-    idea_id   = data.get("idea_id", 0)
-    action    = data.get("action", "").upper()
-    title     = data.get("title", f"Idea {idea_id}")
-    hypothesis    = data.get("hypothesis", "")
+    data           = request.json or {}
+    idea_id        = data.get("idea_id", 0)
+    action         = data.get("action", "").upper()
+    title          = data.get("title", f"Idea {idea_id}")
+    hypothesis     = data.get("hypothesis", "")
     recommendation = data.get("recommendation", "")
-    reasoning = data.get("reasoning", "")
-
+    reasoning      = data.get("reasoning", "")
     if action not in ("APPROVE", "REJECT", "DISCUSS"):
         return jsonify({"error": "action must be APPROVE, REJECT, or DISCUSS"}), 400
-
-    send_telegram(f"JARVIS: Idea {idea_id} {action} via frontend — {title}")
-
+    send_telegram(f"JARVIS: Idea {idea_id} {action} via frontend -- {title}")
     if action == "DISCUSS":
         return jsonify({"status": "discuss", "idea_id": idea_id})
-
     notion_queued, notion_error = False, ""
     if action == "APPROVE":
-        notion_queued, notion_error = queue_idea_to_notion(idea_id, {
-            "title": title, "hypothesis": hypothesis,
-            "recommendation": recommendation, "reasoning": reasoning, "id": idea_id,
-        })
-
+        notion_queued, notion_error = queue_idea_to_notion(idea_id, {"title": title, "hypothesis": hypothesis, "recommendation": recommendation, "reasoning": reasoning, "id": idea_id})
     return jsonify({"status": "ok", "message": f"Idea {idea_id} approved. ATF job queued.", "idea_id": idea_id, "notion_queued": notion_queued, "notion_error": notion_error})
 
 @app.route("/ideas_status", methods=["GET"])
@@ -514,29 +537,22 @@ def chat():
     message    = data.get("message", "").strip()
     session_id = data.get("session_id", "default")
     stream     = data.get("stream", False)
-
     if not message:
         return jsonify({"error": "No message provided"}), 400
-
-    # Load conversation from Notion if first message of session
     if session_id not in conversations:
         conversations[session_id] = load_conversation(session_id)
-
     conversations[session_id].append({"role": "user", "content": message})
     history = conversations[session_id][-20:]
-
-    # Build system prompt with live corpus context
     try:
-        corpus_data = fetch_corpus()
+        corpus_data    = fetch_corpus()
         corpus_context = build_corpus_context(corpus_data)
-        full_system = corpus_context + "\n\n" + JARVIS_SYSTEM
+        full_system    = corpus_context + "\n\n" + JARVIS_SYSTEM
     except Exception:
         full_system = JARVIS_SYSTEM
-
     if stream:
         def generate():
             full_response = ""
-            with client.messages.stream(model="claude-sonnet-4-6", max_tokens=1000, system=full_system, messages=history) as s:
+            with client.messages.stream(model="claude-sonnet-4-6", max_tokens=1500, system=full_system, messages=history) as s:
                 for text in s.text_stream:
                     full_response += text
                     yield f"data: {json.dumps({'text': text})}\n\n"
@@ -545,8 +561,8 @@ def chat():
             yield f"data: {json.dumps({'done': True})}\n\n"
         return Response(stream_with_context(generate()), mimetype="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     else:
-        response = client.messages.create(model="claude-sonnet-4-6", max_tokens=1000, system=full_system, messages=history)
-        reply = response.content[0].text
+        response = client.messages.create(model="claude-sonnet-4-6", max_tokens=1500, system=full_system, messages=history)
+        reply    = response.content[0].text
         conversations[session_id].append({"role": "assistant", "content": reply})
         save_conversation(session_id, conversations[session_id])
         return jsonify({"response": reply})
