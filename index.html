@@ -44,7 +44,6 @@
     position: relative;
   }
 
-  /* HEADER */
   .header {
     padding: 12px 16px;
     border-bottom: 1px solid var(--border);
@@ -101,7 +100,6 @@
 
   @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
 
-  /* TAB BAR */
   .tab-bar {
     display: flex;
     border-bottom: 1px solid var(--border);
@@ -118,7 +116,6 @@
   .tab:hover { color: var(--text); }
   .tab.active { color: var(--red); border-bottom-color: var(--red); }
 
-  /* MESSAGES */
   .messages {
     flex: 1; overflow-y: auto; padding: 16px;
     display: flex; flex-direction: column; gap: 14px;
@@ -155,7 +152,6 @@
   .listening-bar { display: none; padding: 8px 16px; background: rgba(245,158,11,0.05); border-top: 1px solid rgba(245,158,11,0.2); font-size: 10px; color: var(--amber); letter-spacing: 2px; text-align: center; flex-shrink: 0; }
   .listening-bar.active { display: block; }
 
-  /* RESEARCH CARDS */
   .research-view {
     display: none; flex: 1; overflow-y: auto;
     padding: 16px; flex-direction: column; gap: 14px;
@@ -187,14 +183,10 @@
   .idea-status.rejected { color: var(--muted); border: 1px solid var(--muted); }
 
   .idea-title { font-family: var(--sans); font-weight: 700; font-size: 14px; color: var(--text); margin-bottom: 10px; }
-
   .idea-divider { height: 1px; background: var(--border); margin: 10px 0; }
-
   .idea-hypothesis { font-size: 11px; color: var(--muted); line-height: 1.6; margin-bottom: 8px; }
 
-  .idea-rec {
-    font-size: 10px; letter-spacing: 1px; margin-bottom: 4px;
-  }
+  .idea-rec { font-size: 10px; letter-spacing: 1px; margin-bottom: 4px; }
   .idea-rec.approve { color: var(--green); }
   .idea-rec.discuss { color: var(--amber); }
   .idea-rec.reject { color: var(--muted); }
@@ -218,7 +210,6 @@
   .idea-confirm { font-size: 10px; color: var(--green); letter-spacing: 1px; margin-top: 8px; display: none; }
   .idea-confirm.visible { display: block; }
 
-  /* QUICK ACTIONS */
   .quick-actions {
     padding: 8px 16px; display: flex; gap: 6px; flex-wrap: wrap;
     border-top: 1px solid var(--border); background: var(--surface); flex-shrink: 0;
@@ -231,7 +222,6 @@
   }
   .quick-btn:hover { border-color: var(--red); color: var(--red); }
 
-  /* INPUT */
   .input-area {
     padding: 12px 16px; border-top: 1px solid var(--border);
     background: var(--surface); display: flex; gap: 8px; align-items: flex-end; flex-shrink: 0;
@@ -262,7 +252,6 @@
   .send-btn:hover { background: #0ea5e9; }
   .send-btn:disabled { background: var(--border2); color: var(--muted); cursor: not-allowed; }
 
-  /* BOOT */
   .boot-overlay {
     position: fixed; inset: 0; background: var(--bg);
     display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -353,6 +342,9 @@ let recognition = null;
 let currentTab = 'chat';
 let ideasLoaded = false;
 
+// Store ideas by ID so onclick handlers can look them up safely
+const ideasStore = {};
+
 // ── BOOT ──────────────────────────────────────────────────────────────────
 const bootMessages = [
   'LOADING CLAUDE API...',
@@ -377,7 +369,6 @@ async function boot() {
   await sleep(500);
   document.getElementById('boot').style.display = 'none';
   addMessage('jarvis', 'Good morning, sir. JARVIS online.\n\nCI Project Portfolio systems nominal. How can I be of service?');
-  // Check for pending research ideas
   checkIdeasStatus();
 }
 
@@ -388,11 +379,9 @@ function switchTab(tab) {
   document.getElementById('tab-research').classList.toggle('active', tab === 'research');
   document.getElementById('messages').style.display = tab === 'chat' ? 'flex' : 'none';
   document.getElementById('research-view').classList.toggle('active', tab === 'research');
-
   if (tab === 'research' && !ideasLoaded) {
     loadResearchIdeas();
   }
-  // Hide badge when viewing research
   if (tab === 'research') {
     document.getElementById('research-badge').classList.remove('visible');
   }
@@ -401,12 +390,11 @@ function switchTab(tab) {
 // ── RESEARCH IDEAS ────────────────────────────────────────────────────────
 async function checkIdeasStatus() {
   try {
-    const res = await fetch(`${API_BASE}/ideas_status`);
+    const res = await fetch(API_BASE + '/ideas_status');
     const data = await res.json();
     if (data.pending_count > 0) {
-      const badge = document.getElementById('research-badge');
-      document.getElementById('badge-text').textContent = `${data.pending_count} IDEAS PENDING`;
-      badge.classList.add('visible');
+      document.getElementById('badge-text').textContent = data.pending_count + ' IDEAS PENDING';
+      document.getElementById('research-badge').classList.add('visible');
     }
   } catch (e) { /* silent */ }
 }
@@ -414,14 +402,14 @@ async function checkIdeasStatus() {
 async function loadResearchIdeas() {
   const view = document.getElementById('research-view');
   document.getElementById('research-loading').style.display = 'block';
-
   try {
-    const res = await fetch(`${API_BASE}/research`);
+    const res = await fetch(API_BASE + '/research');
     const data = await res.json();
     document.getElementById('research-loading').style.display = 'none';
     ideasLoaded = true;
-
-    data.ideas.forEach(idea => {
+    data.ideas.forEach(function(idea) {
+      // Store idea data by ID for safe retrieval
+      ideasStore[idea.id] = idea;
       view.appendChild(buildIdeaCard(idea));
     });
   } catch (e) {
@@ -430,97 +418,136 @@ async function loadResearchIdeas() {
 }
 
 function buildIdeaCard(idea) {
-  const recClass = { APPROVE: 'approve', DISCUSS: 'discuss', REJECT: 'reject' }[idea.recommendation] || 'discuss';
-  const statusClass = idea.status.toLowerCase();
+  var recClass = { APPROVE: 'approve', DISCUSS: 'discuss', REJECT: 'reject' }[idea.recommendation] || 'discuss';
+  var statusClass = (idea.status || 'pending').toLowerCase();
 
-  const card = document.createElement('div');
+  var card = document.createElement('div');
   card.className = 'idea-card';
-  card.id = `idea-${idea.id}`;
-  card.innerHTML = `
-    <div class="idea-header">
-      <span class="idea-num">IDEA ${idea.id}</span>
-      <span class="idea-status ${statusClass}">${idea.status}</span>
-    </div>
-    <div class="idea-title">${escapeHtml(idea.title)}</div>
-    <div class="idea-divider"></div>
-    <div class="idea-hypothesis">${escapeHtml(idea.hypothesis)}</div>
-    <div class="idea-rec ${recClass}">JARVIS: ${idea.recommendation} — ${idea.confidence} CONFIDENCE</div>
-    <div class="idea-reasoning">${escapeHtml(idea.reasoning)}</div>
-    <div class="idea-divider"></div>
-    <div class="idea-actions">
-      <button class="idea-btn approve-btn" onclick="handleIdea(${idea.id}, 'APPROVE', ${JSON.stringify(idea)})">APPROVE</button>
-      <button class="idea-btn reject-btn" onclick="handleIdea(${idea.id}, 'REJECT', ${JSON.stringify(idea)})">REJECT</button>
-      <button class="idea-btn discuss-btn" onclick="handleIdea(${idea.id}, 'DISCUSS', ${JSON.stringify(idea)})">DISCUSS</button>
-    </div>
-    <div class="idea-confirm" id="confirm-${idea.id}"></div>
-  `;
+  card.id = 'idea-' + idea.id;
+
+  var header = document.createElement('div');
+  header.className = 'idea-header';
+  header.innerHTML = '<span class="idea-num">IDEA ' + idea.id + '</span>' +
+    '<span class="idea-status ' + statusClass + '">' + (idea.status || 'PENDING') + '</span>';
+
+  var title = document.createElement('div');
+  title.className = 'idea-title';
+  title.textContent = idea.title;
+
+  var div1 = document.createElement('div');
+  div1.className = 'idea-divider';
+
+  var hyp = document.createElement('div');
+  hyp.className = 'idea-hypothesis';
+  hyp.textContent = idea.hypothesis;
+
+  var rec = document.createElement('div');
+  rec.className = 'idea-rec ' + recClass;
+  rec.textContent = 'JARVIS: ' + idea.recommendation + ' \u2014 ' + (idea.confidence || 'MEDIUM') + ' CONFIDENCE';
+
+  var reasoning = document.createElement('div');
+  reasoning.className = 'idea-reasoning';
+  reasoning.textContent = idea.reasoning;
+
+  var div2 = document.createElement('div');
+  div2.className = 'idea-divider';
+
+  var actions = document.createElement('div');
+  actions.className = 'idea-actions';
+
+  var approveBtn = document.createElement('button');
+  approveBtn.className = 'idea-btn approve-btn';
+  approveBtn.textContent = 'APPROVE';
+  approveBtn.onclick = function() { handleIdea(idea.id, 'APPROVE'); };
+
+  var rejectBtn = document.createElement('button');
+  rejectBtn.className = 'idea-btn reject-btn';
+  rejectBtn.textContent = 'REJECT';
+  rejectBtn.onclick = function() { handleIdea(idea.id, 'REJECT'); };
+
+  var discussBtn = document.createElement('button');
+  discussBtn.className = 'idea-btn discuss-btn';
+  discussBtn.textContent = 'DISCUSS';
+  discussBtn.onclick = function() { handleIdea(idea.id, 'DISCUSS'); };
+
+  actions.appendChild(approveBtn);
+  actions.appendChild(rejectBtn);
+  actions.appendChild(discussBtn);
+
+  var confirm = document.createElement('div');
+  confirm.className = 'idea-confirm';
+  confirm.id = 'confirm-' + idea.id;
+
+  card.appendChild(header);
+  card.appendChild(title);
+  card.appendChild(div1);
+  card.appendChild(hyp);
+  card.appendChild(rec);
+  card.appendChild(reasoning);
+  card.appendChild(div2);
+  card.appendChild(actions);
+  card.appendChild(confirm);
+
   return card;
 }
 
-async function handleIdea(id, action, idea) {
-  const title = typeof idea === 'object' ? idea.title : idea;
+async function handleIdea(id, action) {
+  // Retrieve idea safely from store
+  var idea = ideasStore[id] || {};
   try {
-    const res = await fetch(`${API_BASE}/approve`, {
+    var res = await fetch(API_BASE + '/approve', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         idea_id: id,
         action: action,
         session_id: SESSION_ID,
-        title: typeof idea === 'object' ? idea.title : idea,
-        hypothesis: typeof idea === 'object' ? idea.hypothesis : '',
-        recommendation: typeof idea === 'object' ? idea.recommendation : '',
-        reasoning: typeof idea === 'object' ? idea.reasoning : ''
+        title: idea.title || '',
+        hypothesis: idea.hypothesis || '',
+        recommendation: idea.recommendation || '',
+        reasoning: idea.reasoning || ''
       })
     });
-    const data = await res.json();
+    var data = await res.json();
 
     if (data.status === 'discuss') {
-      // Switch to chat and pre-load discussion
       switchTab('chat');
-      const prompt = `[IDEA ${id}: ${title}] Analyse this idea critically against our existing corpus. Does it add genuine edge or overlap with what we already have?`;
+      var prompt = '[IDEA ' + id + ': ' + (idea.title || '') + '] Analyse this idea critically against our existing corpus. Does it add genuine edge or overlap with what we already have?';
       document.getElementById('input').value = prompt;
       autoResize(document.getElementById('input'));
       document.getElementById('input').focus();
       return;
     }
 
-    // Update card UI
-    const card = document.getElementById(`idea-${id}`);
+    var card = document.getElementById('idea-' + id);
     if (card) {
       card.classList.add(action.toLowerCase() === 'approve' ? 'approved' : 'rejected');
-      // Update status pill
-      const pill = card.querySelector('.idea-status');
+      var pill = card.querySelector('.idea-status');
       if (pill) {
-        pill.className = `idea-status ${action.toLowerCase() === 'approve' ? 'approved' : 'rejected'}`;
+        pill.className = 'idea-status ' + (action.toLowerCase() === 'approve' ? 'approved' : 'rejected');
         pill.textContent = action === 'APPROVE' ? 'APPROVED' : 'REJECTED';
       }
-      // Disable buttons
-      card.querySelectorAll('.idea-btn').forEach(b => b.disabled = true);
-      // Show confirm
-      const confirm = document.getElementById(`confirm-${id}`);
-      if (confirm) {
-        confirm.textContent = action === 'APPROVE' ? 'Approved, sir. ATF job queued.' : 'Rejected and logged, sir.';
-        confirm.style.color = action === 'APPROVE' ? 'var(--green)' : 'var(--muted)';
-        confirm.classList.add('visible');
+      card.querySelectorAll('.idea-btn').forEach(function(b) { b.disabled = true; });
+      var confirmEl = document.getElementById('confirm-' + id);
+      if (confirmEl) {
+        confirmEl.textContent = action === 'APPROVE' ? 'Approved, sir. ATF job queued.' : 'Rejected and logged, sir.';
+        confirmEl.style.color = action === 'APPROVE' ? 'var(--green)' : 'var(--muted)';
+        confirmEl.classList.add('visible');
       }
     }
   } catch (e) {
-    console.error('Approve failed:', e);
+    console.error('Action failed:', e);
   }
 }
 
-// ── MESSAGING ─────────────────────────────────────────────────────────────
-// ── Voice output ──────────────────────────────────────────────────────────
-
-let preferredVoice = null;
+// ── VOICE OUTPUT ──────────────────────────────────────────────────────────
+var preferredVoice = null;
 
 function loadPreferredVoice() {
-  const voices = window.speechSynthesis.getVoices();
-  // Try Daniel first, then any British male, then any British
-  preferredVoice = voices.find(v => v.name === 'Daniel') ||
-    voices.find(v => v.lang.includes('en-GB') && v.name.toLowerCase().includes('male')) ||
-    voices.find(v => v.lang.includes('en-GB')) ||
+  var voices = window.speechSynthesis.getVoices();
+  preferredVoice = voices.find(function(v) { return v.name === 'Daniel'; }) ||
+    voices.find(function(v) { return v.lang.includes('en-GB') && v.name.toLowerCase().includes('male'); }) ||
+    voices.find(function(v) { return v.lang.includes('en-GB'); }) ||
     null;
 }
 
@@ -533,53 +560,67 @@ if (window.speechSynthesis.getVoices().length > 0) {
 function speakText(text) {
   if (!window.speechSynthesis) return;
   window.speechSynthesis.cancel();
-  // Strip markdown and excess whitespace for cleaner speech
-  const clean = text.replace(/[*_`#]/g, '').replace(/\n+/g, ' ').trim();
-  const u = new SpeechSynthesisUtterance(clean);
+  var clean = text.replace(/[*_`#]/g, '').replace(/\n+/g, ' ').trim();
+  var u = new SpeechSynthesisUtterance(clean);
   if (preferredVoice) u.voice = preferredVoice;
-  u.rate = 0.92;
-  u.pitch = 0.95;
-  u.volume = 1.0;
+  u.rate = 0.92; u.pitch = 0.95; u.volume = 1.0;
   window.speechSynthesis.speak(u);
 }
 
+// ── MESSAGING ─────────────────────────────────────────────────────────────
 function addMessage(role, content) {
-  const msgs = document.getElementById('messages');
-  const div = document.createElement('div');
-  div.className = `msg ${role}`;
-  const speakBtn = role === 'jarvis'
-    ? `<button onclick="speakText(${JSON.stringify(content)})" title="Speak" style="background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:11px;padding:2px 4px;margin-left:4px;opacity:0.5;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.5">🔊</button>`
-    : '';
-  div.innerHTML = `
-    <div class="avatar ${role}">${role === 'jarvis' ? 'J' : 'A'}</div>
-    <div class="bubble">${escapeHtml(content)}${speakBtn}</div>
-  `;
+  var msgs = document.getElementById('messages');
+  var div = document.createElement('div');
+  div.className = 'msg ' + role;
+
+  var avatar = document.createElement('div');
+  avatar.className = 'avatar ' + role;
+  avatar.textContent = role === 'jarvis' ? 'J' : 'A';
+
+  var bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = content;
+
+  if (role === 'jarvis') {
+    var speakBtn = document.createElement('button');
+    speakBtn.title = 'Speak';
+    speakBtn.textContent = '\uD83D\uDD0A';
+    speakBtn.style.cssText = 'background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:11px;padding:2px 4px;margin-left:4px;opacity:0.5;';
+    speakBtn.onmouseover = function() { this.style.opacity = '1'; };
+    speakBtn.onmouseout = function() { this.style.opacity = '0.5'; };
+    var capturedContent = content;
+    speakBtn.onclick = function() { speakText(capturedContent); };
+    bubble.appendChild(speakBtn);
+  }
+
+  div.appendChild(avatar);
+  div.appendChild(bubble);
   msgs.appendChild(div);
   msgs.scrollTop = msgs.scrollHeight;
   return div;
 }
 
 function addThinking() {
-  const msgs = document.getElementById('messages');
-  const div = document.createElement('div');
+  var msgs = document.getElementById('messages');
+  var div = document.createElement('div');
   div.className = 'thinking'; div.id = 'thinking';
-  div.innerHTML = `<div class="avatar jarvis">J</div><div class="dots"><span></span><span></span><span></span></div>`;
+  div.innerHTML = '<div class="avatar jarvis">J</div><div class="dots"><span></span><span></span><span></span></div>';
   msgs.appendChild(div);
   msgs.scrollTop = msgs.scrollHeight;
 }
 
-function removeThinking() { const t = document.getElementById('thinking'); if (t) t.remove(); }
+function removeThinking() { var t = document.getElementById('thinking'); if (t) t.remove(); }
 
 function setStatus(state) {
-  const dot = document.getElementById('status-dot');
-  const text = document.getElementById('status-text');
+  var dot = document.getElementById('status-dot');
+  var text = document.getElementById('status-text');
   dot.className = 'status-dot ' + state;
-  text.textContent = { '': 'ONLINE', 'thinking': 'PROCESSING', 'listening': 'LISTENING', 'offline': 'OFFLINE' }[state] || 'ONLINE';
+  var labels = { '': 'ONLINE', 'thinking': 'PROCESSING', 'listening': 'LISTENING', 'offline': 'OFFLINE' };
+  text.textContent = labels[state] || 'ONLINE';
 }
 
-// ── Progressive acknowledgement ───────────────────────────────────────────
-
-const ACKNOWLEDGEMENTS = [
+// ── PROGRESSIVE ACKNOWLEDGEMENT ───────────────────────────────────────────
+var ACKNOWLEDGEMENTS = [
   "One moment, sir. Running analysis.",
   "On it. Cross-referencing now.",
   "Understood. Give me a moment.",
@@ -592,16 +633,16 @@ const ACKNOWLEDGEMENTS = [
   "On it."
 ];
 
-const LONG_QUERY_SIGNALS = [
+var LONG_QUERY_SIGNALS = [
   'research', 'analys', 'compare', 'explain', 'review', 'find', 'look at',
   'tell me about', 'what does', 'what is', 'how does', 'summarise', 'summarize',
   'describe', 'evaluate', 'assess', 'investigate', 'search', 'check', 'show me'
 ];
 
 function isLongQuery(text) {
-  const lower = text.toLowerCase();
+  var lower = text.toLowerCase();
   if (text.split(' ').length > 12) return true;
-  return LONG_QUERY_SIGNALS.some(signal => lower.includes(signal));
+  return LONG_QUERY_SIGNALS.some(function(s) { return lower.includes(s); });
 }
 
 function getAcknowledgement() {
@@ -609,25 +650,21 @@ function getAcknowledgement() {
 }
 
 async function sendMessage(overrideText) {
-  const input = document.getElementById('input');
-  const text = (overrideText || input.value).trim();
+  var input = document.getElementById('input');
+  var text = (overrideText || input.value).trim();
   if (!text || isThinking) return;
 
-  // Switch to chat tab if on research
   if (currentTab !== 'chat') switchTab('chat');
 
   input.value = '';
   autoResize(input);
   addMessage('user', text);
 
-  // Progressive acknowledgement for longer queries
-  let ackMsg = null;
+  var ackMsg = null;
   if (isLongQuery(text)) {
-    const ack = getAcknowledgement();
-    ackMsg = addMessage('jarvis', ack);
-    // Style it as a temporary acknowledgement
+    ackMsg = addMessage('jarvis', getAcknowledgement());
     if (ackMsg) {
-      const bubble = ackMsg.querySelector('.bubble');
+      var bubble = ackMsg.querySelector('.bubble');
       if (bubble) bubble.style.opacity = '0.6';
     }
     await sleep(600);
@@ -639,21 +676,20 @@ async function sendMessage(overrideText) {
   document.getElementById('send-btn').disabled = true;
 
   try {
-    const res = await fetch(`${API_BASE}/chat`, {
+    var res = await fetch(API_BASE + '/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: text, session_id: SESSION_ID, stream: false })
     });
     removeThinking();
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    // Remove acknowledgement message before showing real response
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var data = await res.json();
     if (ackMsg) ackMsg.remove();
     addMessage('jarvis', data.response);
   } catch (err) {
     removeThinking();
     if (ackMsg) ackMsg.remove();
-    addMessage('jarvis', `Apologies, sir — connection issue. ${err.message}\n\nShall we try again?`);
+    addMessage('jarvis', 'Apologies, sir \u2014 connection issue. ' + err.message + '\n\nShall we try again?');
   } finally {
     isThinking = false;
     setStatus('');
@@ -665,34 +701,64 @@ async function sendMessage(overrideText) {
 function quickSend(text) { document.getElementById('input').value = text; sendMessage(); }
 
 async function resetSession() {
-  await fetch(`${API_BASE}/reset`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: SESSION_ID }) });
+  await fetch(API_BASE + '/reset', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: SESSION_ID })
+  });
   document.getElementById('messages').innerHTML = '';
   addMessage('jarvis', 'Session cleared, sir. Starting fresh.');
 }
 
-// ── VOICE ─────────────────────────────────────────────────────────────────
+// ── VOICE INPUT ───────────────────────────────────────────────────────────
 function initVoice() {
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) return null;
-  const rec = new SpeechRecognition();
+  var rec = new SpeechRecognition();
   rec.continuous = false; rec.interimResults = true; rec.lang = 'en-GB';
-  rec.onstart = () => { isListening = true; setStatus('listening'); document.getElementById('arc-reactor').classList.add('listening'); document.getElementById('mic-btn').classList.add('active'); document.getElementById('listening-bar').classList.add('active'); };
-  rec.onresult = (event) => { const transcript = Array.from(event.results).map(r => r[0].transcript).join(''); document.getElementById('input').value = transcript; autoResize(document.getElementById('input')); };
-  rec.onend = () => { isListening = false; setStatus(''); document.getElementById('arc-reactor').classList.remove('listening'); document.getElementById('mic-btn').classList.remove('active'); document.getElementById('listening-bar').classList.remove('active'); const text = document.getElementById('input').value.trim(); if (text) sendMessage(); };
-  rec.onerror = () => { isListening = false; setStatus(''); document.getElementById('arc-reactor').classList.remove('listening'); document.getElementById('mic-btn').classList.remove('active'); document.getElementById('listening-bar').classList.remove('active'); };
+  rec.onstart = function() {
+    isListening = true; setStatus('listening');
+    document.getElementById('arc-reactor').classList.add('listening');
+    document.getElementById('mic-btn').classList.add('active');
+    document.getElementById('listening-bar').classList.add('active');
+  };
+  rec.onresult = function(event) {
+    var transcript = Array.from(event.results).map(function(r) { return r[0].transcript; }).join('');
+    document.getElementById('input').value = transcript;
+    autoResize(document.getElementById('input'));
+  };
+  rec.onend = function() {
+    isListening = false; setStatus('');
+    document.getElementById('arc-reactor').classList.remove('listening');
+    document.getElementById('mic-btn').classList.remove('active');
+    document.getElementById('listening-bar').classList.remove('active');
+    var text = document.getElementById('input').value.trim();
+    if (text) sendMessage();
+  };
+  rec.onerror = function() {
+    isListening = false; setStatus('');
+    document.getElementById('arc-reactor').classList.remove('listening');
+    document.getElementById('mic-btn').classList.remove('active');
+    document.getElementById('listening-bar').classList.remove('active');
+  };
   return rec;
 }
 
 function toggleVoice() {
-  if (!recognition) { recognition = initVoice(); if (!recognition) { addMessage('jarvis', "Voice input isn't supported in this browser, sir. Chrome works best."); return; } }
+  if (!recognition) {
+    recognition = initVoice();
+    if (!recognition) {
+      addMessage('jarvis', "Voice input isn't supported in this browser, sir. Chrome works best.");
+      return;
+    }
+  }
   if (isListening) { recognition.stop(); } else { recognition.start(); }
 }
 
 // ── UTILS ─────────────────────────────────────────────────────────────────
 function handleKey(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }
 function autoResize(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 100) + 'px'; }
-function escapeHtml(text) { return String(text).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;'); }
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
 
 boot();
 </script>
