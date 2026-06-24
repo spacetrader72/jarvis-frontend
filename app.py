@@ -325,7 +325,12 @@ def clear_conversation(session_id):
     except Exception:
         pass
 
-# ── Demo ideas ─────────────────────────────────────────────────────────────
+# ── Live ideas store (populated by research agent via POST /ideas/update) ──
+
+_live_ideas = []
+_live_ideas_meta = {"updated_at": None, "source": None}
+
+# ── Demo ideas (fallback only) ──────────────────────────────────────────────
 
 DEMO_IDEAS = [
     {"id": 1, "title": "MS-GARCH Regime Detection", "hypothesis": "MS-GARCH as alternative to HMM3.", "recommendation": "REJECT", "confidence": "HIGH", "reasoning": "HMM3 achieves 87.9% agreement. No new information.", "status": "PENDING"},
@@ -427,9 +432,37 @@ def health():
 def corpus():
     return jsonify(fetch_corpus())
 
+@app.route("/ideas/update", methods=["POST"])
+def ideas_update():
+    """Called by jarvis_research.py on VPS after each research run."""
+    # Validate shared secret to prevent abuse
+    secret = request.headers.get("X-Jarvis-Secret", "")
+    expected = os.environ.get("JARVIS_RESEARCH_SECRET", "jarvis-research-2026")
+    if secret != expected:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.json or {}
+    ideas = data.get("ideas", [])
+    source = data.get("source", "research_agent")
+    updated_at = data.get("updated_at", datetime.now(timezone.utc).isoformat())
+
+    if not ideas:
+        return jsonify({"error": "No ideas provided"}), 400
+
+    global _live_ideas, _live_ideas_meta
+    _live_ideas = ideas
+    _live_ideas_meta = {"updated_at": updated_at, "source": source}
+
+    send_telegram(f"JARVIS: {len(ideas)} research ideas loaded into frontend")
+    return jsonify({"status": "ok", "ideas_loaded": len(ideas), "updated_at": updated_at})
+
 @app.route("/research", methods=["GET"])
 @auth.login_required
 def research():
+    # Priority 1: live ideas pushed by research agent
+    if _live_ideas:
+        return jsonify({"ideas": _live_ideas, "source": _live_ideas_meta.get("source", "live"), "updated_at": _live_ideas_meta.get("updated_at"), "count": len(_live_ideas)})
+    # Priority 2: Notion
     ideas = fetch_notion_ideas()
     source = "notion"
     if not ideas:
