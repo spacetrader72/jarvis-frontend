@@ -1,8 +1,14 @@
 """
-JARVIS Frontend Backend v2.0
+JARVIS Frontend Backend v2.1
 =============================
 Flask API powering the Jarvis web front end.
 Includes: auth, corpus injection, session persistence, research queue, Drive data.
+
+v2.1 changes:
+- APPROVE: queues to Notion + logs PENDING_ATF to results_index
+- REJECT: logs REJECTED to results_index with hypothesis + reasoning
+- DISCUSS: creates Notion page + logs UNDER_REVIEW to results_index with page ID
+- System prompt updated: Jarvis surfaces prior rejections when similar ideas arise
 """
 
 import os
@@ -49,8 +55,17 @@ AUTHORITY:
 - Forex: autonomous deployment of pre-agreed strategies only
 - Everything else: act within established patterns, report outcomes
 
-RESEARCH REVIEW: When Andrew discusses [IDEA N:], analyse critically against the
-corpus. Be direct. Never approve weak ideas to be agreeable.
+RESEARCH REVIEW: When Andrew discusses any research idea, ALWAYS check the corpus
+(injected above) for prior verdicts before engaging. Specifically:
+- If the idea matches a REJECTED entry: immediately flag the prior rejection, state
+  the hypothesis that was rejected and the reason, then assess whether the new framing
+  is genuinely different. Only engage substantively if the new framing addresses the
+  rejection reason. Do not re-explore rejected ground.
+- If the idea matches an UNDER_REVIEW entry: flag that it is already being tracked,
+  reference the Notion page if available, and continue the discussion in that context.
+- If the idea matches a PENDING_ATF entry: flag that it is already queued for testing.
+- If no prior verdict exists: analyse critically against the corpus. Be direct.
+  Never approve weak ideas to be agreeable.
 
 DATA ACCESS: The live state injected above this system prompt includes strategy
 state, live positions, recent research verdicts, AND the full results index of
@@ -73,12 +88,11 @@ def notion_headers():
 
 # -- Drive helpers ------------------------------------------------------------
 
-RESULTS_INDEX_FILE_ID = "1NYIl0nKAfHYu2mq4aqMYYtjwO1t3nIq0"
+RESULTS_INDEX_FILE_ID = "1XGZxZbNGo5dG_Zneup7pbf9FLsd-w_Uj"
 _drive_cache = {"results_index": None, "fetched_at": 0}
-DRIVE_TTL = 3600  # 1 hour -- results index doesn't change often
+DRIVE_TTL = 3600
 
 def get_drive_service():
-    """Build Drive service from GOOGLE_TOKEN_JSON env var (single-line JSON string)."""
     try:
         from google.oauth2.credentials import Credentials
         from google.auth.transport.requests import Request
@@ -103,10 +117,6 @@ def get_drive_service():
         return None
 
 def load_results_index():
-    """
-    Fetch results_index.json from Drive and return a compact corpus summary.
-    Cached for 1 hour. Returns empty string if Drive unavailable.
-    """
     now = time.time()
     if _drive_cache["results_index"] and (now - _drive_cache["fetched_at"]) < DRIVE_TTL:
         return _drive_cache["results_index"]
@@ -117,17 +127,16 @@ def load_results_index():
         content = svc.files().get_media(fileId=RESULTS_INDEX_FILE_ID).execute()
         raw     = content.decode("utf-8", errors="ignore") if isinstance(content, bytes) else str(content)
         data    = json.loads(raw)
-        # results_index is list of {strategies: [...]} blocks
         entries = []
         if isinstance(data, list):
             for block in data:
                 entries.extend(block.get("strategies", []))
         lines = ["STRATEGIES TESTED TO DATE:"]
         for e in entries:
-            verdict = e.get("verdict", "?")
-            ann     = round(e.get("oos_ann_ret", 0) * 100, 1) if e.get("oos_ann_ret") else "?"
-            sharpe  = e.get("oos_sharpe", "?")
-            notes   = e.get("notes", "")[:60]
+            verdict  = e.get("verdict", "?")
+            ann      = round(e.get("oos_ann_ret", 0) * 100, 1) if e.get("oos_ann_ret") else "?"
+            sharpe   = e.get("oos_sharpe", "?")
+            notes    = e.get("notes", "")[:80]
             lines.append(
                 f"  {e.get('name','?')} [{verdict}] ann={ann}% Sharpe={sharpe}"
                 + (f" -- {notes}" if notes else "")
@@ -141,10 +150,43 @@ def load_results_index():
         print(f"Results index load failed: {e}")
         return ""
 
+def update_results_index(entry: dict):
+    """
+    Append a new strategy/research entry to results_index.json on Drive.
+    Returns (success: bool, message: str)
+    """
+    try:
+        svc = get_drive_service()
+        if not svc:
+            return False, "Drive not connected"
+
+        content = svc.files().get_media(fileId=RESULTS_INDEX_FILE_ID).execute()
+        raw     = content.decode("utf-8", errors="ignore") if isinstance(content, bytes) else str(content)
+        data    = json.loads(raw)
+        if not isinstance(data, list):
+            data = []
+
+        data.append({"strategies": [entry]})
+
+        from googleapiclient.http import MediaInMemoryUpload
+        updated_json = json.dumps(data, indent=2)
+        media        = MediaInMemoryUpload(updated_json.encode("utf-8"), mimetype="application/json")
+        svc.files().update(fileId=RESULTS_INDEX_FILE_ID, media_body=media).execute()
+
+        # Invalidate cache
+        _drive_cache["results_index"] = None
+        _drive_cache["fetched_at"]    = 0
+
+        print(f"Results index updated: {entry.get('id')} [{entry.get('verdict')}]")
+        return True, "Results index updated"
+    except Exception as e:
+        print(f"Results index update failed: {e}")
+        return False, str(e)
+
 # -- Corpus cache -------------------------------------------------------------
 
 _corpus_cache = {"data": None, "fetched_at": 0}
-CORPUS_TTL = 300  # 5 minutes
+CORPUS_TTL = 300
 
 STRATEGY_STATE = {
     "minervini": {
@@ -185,22 +227,18 @@ STRATEGY_STATE = {
 }
 
 def fetch_corpus():
-    """Fetch live Trading Lab state. Returns corpus dict."""
     global _corpus_cache
     now = time.time()
     if _corpus_cache["data"] and (now - _corpus_cache["fetched_at"]) < CORPUS_TTL:
         return _corpus_cache["data"]
-
     corpus = {
         "strategy_state":  STRATEGY_STATE,
         "live_positions":  [],
         "recent_verdicts": [],
         "fetched_at":      datetime.now(timezone.utc).isoformat(),
     }
-
     token = os.environ.get("NOTION_TOKEN", "")
     if token:
-        # Live positions
         try:
             resp = requests.post(
                 f"{NOTION_API}/databases/{NOTION_DB_ID}/query",
@@ -224,8 +262,6 @@ def fetch_corpus():
                 corpus["live_positions"] = positions[:10]
         except Exception:
             pass
-
-        # Recent verdicts
         try:
             resp = requests.post(
                 f"{NOTION_API}/search",
@@ -245,24 +281,18 @@ def fetch_corpus():
                 corpus["recent_verdicts"] = verdicts
         except Exception:
             pass
-
     _corpus_cache = {"data": corpus, "fetched_at": now}
     return corpus
 
 def build_corpus_context(corpus):
-    """Build concise context string from corpus data, including results index."""
     s         = corpus.get("strategy_state", {})
     positions = corpus.get("live_positions", [])
     verdicts  = corpus.get("recent_verdicts", [])
     ts        = corpus.get("fetched_at", "")[:16].replace("T", " ")
-
     pos_str     = ", ".join(p["ticker"] for p in positions) if positions else "none loaded"
     verdict_str = " | ".join(v["title"] for v in verdicts) if verdicts else "none loaded"
-
-    # Load results index from Drive
-    results_index = load_results_index()
+    results_index   = load_results_index()
     results_section = f"\n{results_index}" if results_index else "\nSTRATEGIES INDEX: unavailable (Drive not connected)"
-
     return f"""LIVE TRADING LAB STATE (as of {ts} UTC):
 Regime: {s.get('regime', 'SIDEWAYS')} -- {s.get('regime_allocation', '100% Minervini')}
 Live equity positions: {pos_str}
@@ -357,7 +387,7 @@ def clear_conversation(session_id):
     except Exception:
         pass
 
-# -- Live ideas store ---------------------------------------------------------
+# -- Research idea helpers ----------------------------------------------------
 
 _live_ideas      = []
 _live_ideas_meta = {"updated_at": None, "source": None}
@@ -414,7 +444,7 @@ def queue_idea_to_notion(idea_id, idea_data):
     token = os.environ.get("NOTION_TOKEN", "")
     if not token:
         return False, "NOTION_TOKEN not set"
-    now_str = datetime.utcnow().date().isoformat()
+    now_str = datetime.now(timezone.utc).date().isoformat()
     detail  = json.dumps({"title": idea_data.get("title",""), "hypothesis": idea_data.get("hypothesis",""), "recommendation": idea_data.get("recommendation",""), "reasoning": idea_data.get("reasoning",""), "id": idea_id})
     props   = {
         "Ticker":          {"title":     [{"text": {"content": f"JARVIS-QUEUE-{idea_id}"}}]},
@@ -428,6 +458,59 @@ def queue_idea_to_notion(idea_id, idea_data):
         if resp.status_code in (200, 201):
             return True, resp.json().get("id", "")
         return False, f"Notion {resp.status_code}"
+    except Exception as e:
+        return False, str(e)
+
+def create_discuss_notion_page(idea_id, title, hypothesis, reasoning):
+    """
+    Create a dedicated Notion page for a DISCUSS idea.
+    Includes session log, open questions, and verdict sections.
+    If the idea is later rejected, the Notion page ID in the results_index
+    links the rejection verdict back to the full discussion history.
+    Returns (success: bool, page_id_or_error: str)
+    """
+    token = os.environ.get("NOTION_TOKEN", "")
+    if not token:
+        return False, "NOTION_TOKEN not set"
+
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    page_body = {
+        "parent": {"page_id": NOTION_ROOT_ID},
+        "properties": {
+            "title": {"title": [{"text": {"content": f"[DISCUSS] {title}"}}]}
+        },
+        "children": [
+            {"object": "block", "type": "heading_2",
+             "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Idea Details"}}]}},
+            {"object": "block", "type": "paragraph",
+             "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"Status: UNDER_REVIEW"}}]}},
+            {"object": "block", "type": "paragraph",
+             "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"Opened: {now_str}"}}]}},
+            {"object": "block", "type": "paragraph",
+             "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"Hypothesis: {hypothesis}"}}]}},
+            {"object": "block", "type": "paragraph",
+             "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"Initial reasoning: {reasoning}"}}]}},
+            {"object": "block", "type": "heading_2",
+             "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Session Log"}}]}},
+            {"object": "block", "type": "paragraph",
+             "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"{now_str}: DISCUSS initiated via Jarvis frontend. Add notes after each session."}}]}},
+            {"object": "block", "type": "heading_2",
+             "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Open Questions"}}]}},
+            {"object": "block", "type": "paragraph",
+             "paragraph": {"rich_text": [{"type": "text", "text": {"content": "What specific question needs resolving before a verdict can be issued?"}}]}},
+            {"object": "block", "type": "heading_2",
+             "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Verdict"}}]}},
+            {"object": "block", "type": "paragraph",
+             "paragraph": {"rich_text": [{"type": "text", "text": {"content": "PENDING — update to APPROVE or REJECT when resolved. If REJECT, this page becomes the audit trail."}}]}},
+        ]
+    }
+
+    try:
+        resp = requests.post(f"{NOTION_API}/pages", headers=notion_headers(), json=page_body, timeout=10)
+        if resp.status_code in (200, 201):
+            return True, resp.json().get("id", "")
+        return False, f"Notion {resp.status_code}: {resp.text[:100]}"
     except Exception as e:
         return False, str(e)
 
@@ -451,9 +534,9 @@ def index():
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
-        "status":         "online",
-        "system":         "JARVIS CI Portfolio",
-        "version":        "2.1",
+        "status":          "online",
+        "system":          "JARVIS CI Portfolio",
+        "version":         "2.1",
         "drive_connected": get_drive_service() is not None,
     })
 
@@ -465,7 +548,6 @@ def corpus():
 @app.route("/data/refresh", methods=["POST"])
 @auth.login_required
 def data_refresh():
-    """Force refresh Drive data cache."""
     _drive_cache["results_index"] = None
     _drive_cache["fetched_at"]    = 0
     summary = load_results_index()
@@ -511,15 +593,105 @@ def approve():
     hypothesis     = data.get("hypothesis", "")
     recommendation = data.get("recommendation", "")
     reasoning      = data.get("reasoning", "")
+
     if action not in ("APPROVE", "REJECT", "DISCUSS"):
         return jsonify({"error": "action must be APPROVE, REJECT, or DISCUSS"}), 400
-    send_telegram(f"JARVIS: Idea {idea_id} {action} via frontend -- {title}")
-    if action == "DISCUSS":
-        return jsonify({"status": "discuss", "idea_id": idea_id})
-    notion_queued, notion_error = False, ""
+
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # ── APPROVE ──────────────────────────────────────────────────────────────
     if action == "APPROVE":
-        notion_queued, notion_error = queue_idea_to_notion(idea_id, {"title": title, "hypothesis": hypothesis, "recommendation": recommendation, "reasoning": reasoning, "id": idea_id})
-    return jsonify({"status": "ok", "message": f"Idea {idea_id} approved. ATF job queued.", "idea_id": idea_id, "notion_queued": notion_queued, "notion_error": notion_error})
+        notion_ok, notion_ref = queue_idea_to_notion(
+            idea_id,
+            {"title": title, "hypothesis": hypothesis,
+             "recommendation": recommendation, "reasoning": reasoning, "id": idea_id}
+        )
+        entry = {
+            "id":         f"RESEARCH_PENDING_{idea_id}",
+            "name":       title,
+            "type":       "research_queue",
+            "verdict":    "PENDING_ATF",
+            "run_date":   now_str,
+            "hypothesis": hypothesis[:200],
+            "notes":      f"Approved via Jarvis frontend. Queued for ATF pipeline. Hypothesis: {hypothesis[:120]}."
+        }
+        drive_ok, drive_msg = update_results_index(entry)
+        send_telegram(f"JARVIS: [APPROVE] {title} — ATF queue + corpus updated.")
+        return jsonify({
+            "status":        "ok",
+            "message":       f"Idea {idea_id} approved. ATF job queued and corpus updated.",
+            "idea_id":       idea_id,
+            "notion_queued": notion_ok,
+            "notion_error":  notion_ref if not notion_ok else "",
+            "drive_updated": drive_ok,
+            "drive_message": drive_msg,
+        })
+
+    # ── REJECT ───────────────────────────────────────────────────────────────
+    if action == "REJECT":
+        # Store hypothesis + reasoning so Jarvis can assess whether a future
+        # similar idea has genuinely different framing before re-engaging.
+        entry = {
+            "id":         f"REJECTED_{idea_id}_{now_str.replace('-','')}",
+            "name":       title,
+            "type":       "research",
+            "verdict":    "REJECTED",
+            "run_date":   now_str,
+            "hypothesis": hypothesis[:200],
+            "rejection_reason": reasoning[:300],
+            "notes": (
+                f"REJECTED via Jarvis frontend on {now_str}. "
+                f"Hypothesis tested: {hypothesis[:120]}. "
+                f"Reason: {reasoning[:150]}. "
+                f"If a similar idea arises, Jarvis must flag this rejection and "
+                f"assess whether the new framing addresses the rejection reason before engaging."
+            )
+        }
+        drive_ok, drive_msg = update_results_index(entry)
+        send_telegram(f"JARVIS: [REJECT] {title} — logged to corpus. Future similar ideas will be flagged.")
+        return jsonify({
+            "status":        "ok",
+            "message":       f"Idea {idea_id} rejected and logged to corpus. Jarvis will flag similar ideas in future.",
+            "idea_id":       idea_id,
+            "drive_updated": drive_ok,
+            "drive_message": drive_msg,
+        })
+
+    # ── DISCUSS ──────────────────────────────────────────────────────────────
+    if action == "DISCUSS":
+        notion_ok, notion_ref = create_discuss_notion_page(idea_id, title, hypothesis, reasoning)
+        entry = {
+            "id":                 f"UNDER_REVIEW_{idea_id}_{now_str.replace('-','')}",
+            "name":               title,
+            "type":               "research",
+            "verdict":            "UNDER_REVIEW",
+            "run_date":           now_str,
+            "hypothesis":         hypothesis[:200],
+            "notion_page_id":     notion_ref if notion_ok else "",
+            "stale_check_after":  "30_days",
+            "notes": (
+                f"Under review via Jarvis frontend since {now_str}. "
+                f"Notion page: {notion_ref if notion_ok else 'creation failed'}. "
+                f"Hypothesis: {hypothesis[:120]}. "
+                f"Layer 3 stale check: flag if no verdict after 30 days. "
+                f"If eventually rejected, notion_page_id links to full session audit trail."
+            )
+        }
+        drive_ok, drive_msg = update_results_index(entry)
+        send_telegram(
+            f"JARVIS: [DISCUSS] {title} — UNDER_REVIEW in corpus. "
+            f"Notion page {'created' if notion_ok else 'FAILED'}. "
+            f"Layer 3 stale check in 30 days."
+        )
+        return jsonify({
+            "status":              "discuss",
+            "message":             f"Idea {idea_id} logged as UNDER_REVIEW. Notion page {'created' if notion_ok else 'failed'}.",
+            "idea_id":             idea_id,
+            "notion_page_id":      notion_ref if notion_ok else "",
+            "notion_page_created": notion_ok,
+            "drive_updated":       drive_ok,
+            "drive_message":       drive_msg,
+        })
 
 @app.route("/ideas_status", methods=["GET"])
 @auth.login_required
