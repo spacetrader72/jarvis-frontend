@@ -88,7 +88,7 @@ def notion_headers():
 
 # -- Drive helpers ------------------------------------------------------------
 
-RESULTS_INDEX_FILE_ID = "1alxoPtihe_Q7rOFO2HWm0qQqvvlkcUVm"
+RESULTS_INDEX_FILE_ID = "1mSzEMKf_6KeI5QhZhVZpuO0DVudlvVVI"
 _drive_cache = {"results_index": None, "fetched_at": 0}
 DRIVE_TTL = 3600
 
@@ -151,32 +151,22 @@ def load_results_index():
         return ""
 
 def update_results_index(entry: dict):
-    """
-    Append a new strategy/research entry to results_index.json on Drive.
-    Returns (success: bool, message: str)
-    """
     try:
         svc = get_drive_service()
         if not svc:
             return False, "Drive not connected"
-
         content = svc.files().get_media(fileId=RESULTS_INDEX_FILE_ID).execute()
         raw     = content.decode("utf-8", errors="ignore") if isinstance(content, bytes) else str(content)
         data    = json.loads(raw)
         if not isinstance(data, list):
             data = []
-
         data.append({"strategies": [entry]})
-
         from googleapiclient.http import MediaInMemoryUpload
         updated_json = json.dumps(data, indent=2)
         media        = MediaInMemoryUpload(updated_json.encode("utf-8"), mimetype="application/json")
         svc.files().update(fileId=RESULTS_INDEX_FILE_ID, media_body=media).execute()
-
-        # Invalidate cache
         _drive_cache["results_index"] = None
         _drive_cache["fetched_at"]    = 0
-
         print(f"Results index updated: {entry.get('id')} [{entry.get('verdict')}]")
         return True, "Results index updated"
     except Exception as e:
@@ -465,9 +455,7 @@ def create_discuss_notion_page(idea_id, title, hypothesis, reasoning):
     token = os.environ.get("NOTION_TOKEN", "")
     if not token:
         return False, "NOTION_TOKEN not set"
-
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
     page_body = {
         "parent": {"page_id": NOTION_ROOT_ID},
         "properties": {
@@ -487,7 +475,7 @@ def create_discuss_notion_page(idea_id, title, hypothesis, reasoning):
             {"object": "block", "type": "heading_2",
              "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Session Log"}}]}},
             {"object": "block", "type": "paragraph",
-             "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"{now_str}: DISCUSS initiated via Jarvis frontend."}}]}},
+             "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"{now_str}: DISCUSS initiated via Jarvis frontend. Add notes after each session."}}]}},
             {"object": "block", "type": "heading_2",
              "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Open Questions"}}]}},
             {"object": "block", "type": "paragraph",
@@ -495,10 +483,9 @@ def create_discuss_notion_page(idea_id, title, hypothesis, reasoning):
             {"object": "block", "type": "heading_2",
              "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Verdict"}}]}},
             {"object": "block", "type": "paragraph",
-             "paragraph": {"rich_text": [{"type": "text", "text": {"content": "PENDING -- update to APPROVE or REJECT when resolved."}}]}},
+             "paragraph": {"rich_text": [{"type": "text", "text": {"content": "PENDING -- update to APPROVE or REJECT when resolved. If REJECT, this page becomes the audit trail."}}]}},
         ]
     }
-
     try:
         resp = requests.post(f"{NOTION_API}/pages", headers=notion_headers(), json=page_body, timeout=10)
         if resp.status_code in (200, 201):
@@ -630,16 +617,17 @@ def approve():
             "rejection_reason": reasoning[:300],
             "notes": (
                 f"REJECTED via Jarvis frontend on {now_str}. "
-                f"Hypothesis: {hypothesis[:120]}. "
+                f"Hypothesis tested: {hypothesis[:120]}. "
                 f"Reason: {reasoning[:150]}. "
-                f"Future similar ideas must address the rejection reason before Jarvis engages."
+                f"If a similar idea arises, Jarvis must flag this rejection and "
+                f"assess whether the new framing addresses the rejection reason before engaging."
             )
         }
         drive_ok, drive_msg = update_results_index(entry)
-        send_telegram(f"JARVIS: [REJECT] {title} -- logged to corpus.")
+        send_telegram(f"JARVIS: [REJECT] {title} -- logged to corpus. Future similar ideas will be flagged.")
         return jsonify({
             "status":        "ok",
-            "message":       f"Idea {idea_id} rejected and logged to corpus.",
+            "message":       f"Idea {idea_id} rejected and logged to corpus. Jarvis will flag similar ideas in future.",
             "idea_id":       idea_id,
             "drive_updated": drive_ok,
             "drive_message": drive_msg,
@@ -657,19 +645,22 @@ def approve():
             "notion_page_id":     notion_ref if notion_ok else "",
             "stale_check_after":  "30_days",
             "notes": (
-                f"Under review since {now_str}. "
+                f"Under review via Jarvis frontend since {now_str}. "
                 f"Notion page: {notion_ref if notion_ok else 'creation failed'}. "
-                f"Layer 3 stale check: flag if no verdict after 30 days."
+                f"Hypothesis: {hypothesis[:120]}. "
+                f"Layer 3 stale check: flag if no verdict after 30 days. "
+                f"If eventually rejected, notion_page_id links to full session audit trail."
             )
         }
         drive_ok, drive_msg = update_results_index(entry)
         send_telegram(
-            f"JARVIS: [DISCUSS] {title} -- UNDER_REVIEW. "
-            f"Notion page {'created' if notion_ok else 'FAILED'}."
+            f"JARVIS: [DISCUSS] {title} -- UNDER_REVIEW in corpus. "
+            f"Notion page {'created' if notion_ok else 'FAILED'}. "
+            f"Layer 3 stale check in 30 days."
         )
         return jsonify({
             "status":              "discuss",
-            "message":             f"Idea {idea_id} logged as UNDER_REVIEW.",
+            "message":             f"Idea {idea_id} logged as UNDER_REVIEW. Notion page {'created' if notion_ok else 'failed'}.",
             "idea_id":             idea_id,
             "notion_page_id":      notion_ref if notion_ok else "",
             "notion_page_created": notion_ok,
