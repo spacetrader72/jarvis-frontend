@@ -88,7 +88,7 @@ def notion_headers():
 
 # -- Drive helpers ------------------------------------------------------------
 
-RESULTS_INDEX_FILE_ID = "1vM-cPLdrsGf1mAwDfKhFW8YdtKpnhRr7"
+RESULTS_INDEX_FILE_ID = "1alxoPtihe_Q7rOFO2HWm0qQqvvlkcUVm"
 _drive_cache = {"results_index": None, "fetched_at": 0}
 DRIVE_TTL = 3600
 
@@ -462,13 +462,6 @@ def queue_idea_to_notion(idea_id, idea_data):
         return False, str(e)
 
 def create_discuss_notion_page(idea_id, title, hypothesis, reasoning):
-    """
-    Create a dedicated Notion page for a DISCUSS idea.
-    Includes session log, open questions, and verdict sections.
-    If the idea is later rejected, the Notion page ID in the results_index
-    links the rejection verdict back to the full discussion history.
-    Returns (success: bool, page_id_or_error: str)
-    """
     token = os.environ.get("NOTION_TOKEN", "")
     if not token:
         return False, "NOTION_TOKEN not set"
@@ -494,7 +487,7 @@ def create_discuss_notion_page(idea_id, title, hypothesis, reasoning):
             {"object": "block", "type": "heading_2",
              "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Session Log"}}]}},
             {"object": "block", "type": "paragraph",
-             "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"{now_str}: DISCUSS initiated via Jarvis frontend. Add notes after each session."}}]}},
+             "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"{now_str}: DISCUSS initiated via Jarvis frontend."}}]}},
             {"object": "block", "type": "heading_2",
              "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Open Questions"}}]}},
             {"object": "block", "type": "paragraph",
@@ -502,7 +495,7 @@ def create_discuss_notion_page(idea_id, title, hypothesis, reasoning):
             {"object": "block", "type": "heading_2",
              "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Verdict"}}]}},
             {"object": "block", "type": "paragraph",
-             "paragraph": {"rich_text": [{"type": "text", "text": {"content": "PENDING — update to APPROVE or REJECT when resolved. If REJECT, this page becomes the audit trail."}}]}},
+             "paragraph": {"rich_text": [{"type": "text", "text": {"content": "PENDING -- update to APPROVE or REJECT when resolved."}}]}},
         ]
     }
 
@@ -599,7 +592,6 @@ def approve():
 
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    # ── APPROVE ──────────────────────────────────────────────────────────────
     if action == "APPROVE":
         notion_ok, notion_ref = queue_idea_to_notion(
             idea_id,
@@ -616,7 +608,7 @@ def approve():
             "notes":      f"Approved via Jarvis frontend. Queued for ATF pipeline. Hypothesis: {hypothesis[:120]}."
         }
         drive_ok, drive_msg = update_results_index(entry)
-        send_telegram(f"JARVIS: [APPROVE] {title} — ATF queue + corpus updated.")
+        send_telegram(f"JARVIS: [APPROVE] {title} -- ATF queue + corpus updated.")
         return jsonify({
             "status":        "ok",
             "message":       f"Idea {idea_id} approved. ATF job queued and corpus updated.",
@@ -627,10 +619,7 @@ def approve():
             "drive_message": drive_msg,
         })
 
-    # ── REJECT ───────────────────────────────────────────────────────────────
     if action == "REJECT":
-        # Store hypothesis + reasoning so Jarvis can assess whether a future
-        # similar idea has genuinely different framing before re-engaging.
         entry = {
             "id":         f"REJECTED_{idea_id}_{now_str.replace('-','')}",
             "name":       title,
@@ -641,23 +630,21 @@ def approve():
             "rejection_reason": reasoning[:300],
             "notes": (
                 f"REJECTED via Jarvis frontend on {now_str}. "
-                f"Hypothesis tested: {hypothesis[:120]}. "
+                f"Hypothesis: {hypothesis[:120]}. "
                 f"Reason: {reasoning[:150]}. "
-                f"If a similar idea arises, Jarvis must flag this rejection and "
-                f"assess whether the new framing addresses the rejection reason before engaging."
+                f"Future similar ideas must address the rejection reason before Jarvis engages."
             )
         }
         drive_ok, drive_msg = update_results_index(entry)
-        send_telegram(f"JARVIS: [REJECT] {title} — logged to corpus. Future similar ideas will be flagged.")
+        send_telegram(f"JARVIS: [REJECT] {title} -- logged to corpus.")
         return jsonify({
             "status":        "ok",
-            "message":       f"Idea {idea_id} rejected and logged to corpus. Jarvis will flag similar ideas in future.",
+            "message":       f"Idea {idea_id} rejected and logged to corpus.",
             "idea_id":       idea_id,
             "drive_updated": drive_ok,
             "drive_message": drive_msg,
         })
 
-    # ── DISCUSS ──────────────────────────────────────────────────────────────
     if action == "DISCUSS":
         notion_ok, notion_ref = create_discuss_notion_page(idea_id, title, hypothesis, reasoning)
         entry = {
@@ -670,22 +657,19 @@ def approve():
             "notion_page_id":     notion_ref if notion_ok else "",
             "stale_check_after":  "30_days",
             "notes": (
-                f"Under review via Jarvis frontend since {now_str}. "
+                f"Under review since {now_str}. "
                 f"Notion page: {notion_ref if notion_ok else 'creation failed'}. "
-                f"Hypothesis: {hypothesis[:120]}. "
-                f"Layer 3 stale check: flag if no verdict after 30 days. "
-                f"If eventually rejected, notion_page_id links to full session audit trail."
+                f"Layer 3 stale check: flag if no verdict after 30 days."
             )
         }
         drive_ok, drive_msg = update_results_index(entry)
         send_telegram(
-            f"JARVIS: [DISCUSS] {title} — UNDER_REVIEW in corpus. "
-            f"Notion page {'created' if notion_ok else 'FAILED'}. "
-            f"Layer 3 stale check in 30 days."
+            f"JARVIS: [DISCUSS] {title} -- UNDER_REVIEW. "
+            f"Notion page {'created' if notion_ok else 'FAILED'}."
         )
         return jsonify({
             "status":              "discuss",
-            "message":             f"Idea {idea_id} logged as UNDER_REVIEW. Notion page {'created' if notion_ok else 'failed'}.",
+            "message":             f"Idea {idea_id} logged as UNDER_REVIEW.",
             "idea_id":             idea_id,
             "notion_page_id":      notion_ref if notion_ok else "",
             "notion_page_created": notion_ok,
