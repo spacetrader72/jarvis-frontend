@@ -88,7 +88,7 @@ def notion_headers():
 
 # -- Drive helpers ------------------------------------------------------------
 
-RESULTS_INDEX_FILE_ID = "1WmqwzG2b5SL1pimod0s1kX6nys9jPNSk"
+RESULTS_INDEX_FILE_ID = "1vM-cPLdrsGf1mAwDfKhFW8YdtKpnhRr7"
 _drive_cache = {"results_index": None, "fetched_at": 0}
 DRIVE_TTL = 3600
 
